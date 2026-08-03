@@ -104,21 +104,23 @@ export const IconLink = () => (
   </svg>
 );
 
+// Brand mark: download arrow + turbo speed streaks (matches the app icon).
 export const IconLogo = () => (
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-    <path
-      d="M12 3v12"
-      stroke="#fff"
-      strokeWidth="2.2"
+    <g
+      stroke="currentColor"
+      strokeWidth="2"
       strokeLinecap="round"
-    />
-    <path
-      d="m7 12 5 5 5-5"
-      stroke="#fff"
-      strokeWidth="2.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-    <path d="M5 20h14" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" />
+      strokeOpacity="0.55"
+    >
+      <path d="M3 7h4" />
+      <path d="M2 12h5" />
+      <path d="M3 17h4" />
+    </g>
+    <g stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M15 4v10" />
+      <path d="m11 11 4 4 4-4" />
+      <path d="M10 20h10" />
+    </g>
   </svg>
 );

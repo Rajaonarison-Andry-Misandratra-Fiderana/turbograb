@@ -97,9 +97,7 @@ body {
   place-items: center;
   background: var(--surface-2);
   border: 1px solid var(--stroke);
-}
-.logo svg path {
-  stroke: var(--text);
+  color: var(--text);
 }
 .brand h1 {
   font-size: 1.15rem;
