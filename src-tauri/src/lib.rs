@@ -118,7 +118,9 @@ fn load(app: &AppHandle) {
             }
             "fetching" => {
                 info.status = "error".into();
-                info.error_msg = "Analyse interrompue".into();
+                // Fixed messages are i18n codes (leading '@'); the UI localizes
+                // them. Dynamic yt-dlp errors pass through verbatim.
+                info.error_msg = "@fetch_interrupted".into();
             }
             _ => {}
         }
@@ -305,7 +307,7 @@ fn last_error_line(stderr: &str) -> String {
         .or_else(|| stderr.lines().rev().find(|l| !l.trim().is_empty()));
     match err {
         Some(l) => l.trim().trim_start_matches("ERROR:").trim().to_string(),
-        None => "Impossible d'analyser cette URL".into(),
+        None => "@analyze_failed".into(),
     }
 }
 
@@ -338,7 +340,7 @@ fn finish_fetch(app: &AppHandle, id: &str, ok: bool, stdout: &str, stderr: &str)
                 }
                 Err(_) => {
                     it.info.status = "error".into();
-                    it.info.error_msg = "Réponse illisible de yt-dlp".into();
+                    it.info.error_msg = "@unreadable".into();
                 }
             }
         }
@@ -493,7 +495,7 @@ fn finalize(app: &AppHandle, id: &str, ok: bool) {
                 it.info.percent = 100.0;
             } else {
                 it.info.status = "error".into();
-                it.info.error_msg = "Le téléchargement a échoué".into();
+                it.info.error_msg = "@download_failed".into();
             }
         }
         let _ = app.emit("download-update", it.info.clone());

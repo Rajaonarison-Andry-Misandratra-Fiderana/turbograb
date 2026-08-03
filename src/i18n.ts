@@ -32,6 +32,8 @@ export interface Dict {
   askDeleteFile: string;
   askDeleteFilesBulk: string;
   status: Record<string, string>;
+  // Fixed backend error codes (sent as "@code"); dynamic yt-dlp text is shown raw.
+  errors: Record<string, string>;
 }
 
 export const DICT: Record<Lang, Dict> = {
@@ -74,6 +76,12 @@ export const DICT: Record<Lang, Dict> = {
       done: "Terminé",
       error: "Erreur",
     },
+    errors: {
+      fetch_interrupted: "Analyse interrompue",
+      analyze_failed: "Impossible d'analyser cette URL",
+      unreadable: "Réponse illisible de yt-dlp",
+      download_failed: "Le téléchargement a échoué",
+    },
   },
   en: {
     tagline: "Downloader — YouTube & files",
@@ -112,6 +120,12 @@ export const DICT: Record<Lang, Dict> = {
       interrupted: "Interrupted",
       done: "Done",
       error: "Error",
+    },
+    errors: {
+      fetch_interrupted: "Analysis interrupted",
+      analyze_failed: "Couldn't analyze this URL",
+      unreadable: "Unreadable yt-dlp response",
+      download_failed: "Download failed",
     },
   },
 };

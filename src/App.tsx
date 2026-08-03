@@ -160,6 +160,11 @@ function App() {
     () => (localStorage.getItem("lang") as Lang) || "fr",
   );
   const t = DICT[lang];
+  // Backend sends fixed messages as "@code"; translate those, show the rest raw.
+  const errText = (msg: string) =>
+    msg.startsWith("@")
+      ? t.errors[msg.slice(1)] ?? t.genericError
+      : msg || t.genericError;
 
   const [tab, setTab] = useState<Tab>("youtube");
   const [url, setUrl] = useState("");
@@ -450,7 +455,7 @@ function App() {
                 {d.status === "error" && (
                   <div className="errline">
                     <IconWarn />
-                    <span>{d.error_msg || t.genericError}</span>
+                    <span>{errText(d.error_msg)}</span>
                   </div>
                 )}
 
