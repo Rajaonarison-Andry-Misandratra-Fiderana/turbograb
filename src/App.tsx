@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, ask } from "@tauri-apps/plugin-dialog";
 import { downloadDir } from "@tauri-apps/api/path";
 import {
   IconAudio,
@@ -19,6 +19,7 @@ import {
   IconWarn,
   IconX,
 } from "./icons";
+import { DICT, type Lang } from "./i18n";
 import "./App.css";
 
 type Status =
@@ -33,6 +34,7 @@ type Status =
 interface Quality {
   label: string;
   value: string;
+  size: string;
 }
 
 type Tab = "youtube" | "file";
@@ -52,16 +54,6 @@ interface DownloadInfo {
   error_msg: string;
   status: Status;
 }
-
-const STATUS_LABEL: Record<Status, string> = {
-  fetching: "Analyse…",
-  ready: "Prêt",
-  downloading: "En cours",
-  paused: "En pause",
-  interrupted: "Interrompu",
-  done: "Terminé",
-  error: "Erreur",
-};
 
 const ORDER: Record<Status, number> = {
   fetching: 0,
@@ -94,7 +86,81 @@ function Thumb({ d }: { d: DownloadInfo }) {
   );
 }
 
+// Custom quality picker: label on the left, estimated size right-aligned.
+// A native <select> can't right-align per-option text, hence the popover.
+function QualitySelect({
+  d,
+  value,
+  onChange,
+  best,
+}: {
+  d: DownloadInfo;
+  value: string;
+  onChange: (v: string) => void;
+  best: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const prefix = d.kind === "audio" ? "🎵 " : "🎬 ";
+  const labelOf = (q: Quality) => (q.value === "" ? best : q.label);
+  const cur = d.qualities.find((q) => q.value === value) ?? d.qualities[0];
+
+  return (
+    <div className={`qsel${open ? " open" : ""}`} ref={ref}>
+      <button
+        type="button"
+        className="qsel-btn"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="qsel-label">
+          {prefix}
+          {cur ? labelOf(cur) : ""}
+        </span>
+        {cur?.size && <span className="qsel-size">{cur.size}</span>}
+        <span className="qsel-caret">▾</span>
+      </button>
+      {open && (
+        <ul className="qsel-list">
+          {d.qualities.map((q) => (
+            <li key={q.value || "best"}>
+              <button
+                type="button"
+                className={q.value === value ? "on" : ""}
+                onClick={() => {
+                  onChange(q.value);
+                  setOpen(false);
+                }}
+              >
+                <span className="qsel-label">
+                  {prefix}
+                  {labelOf(q)}
+                </span>
+                {q.size && <span className="qsel-size">{q.size}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function App() {
+  const [lang, setLang] = useState<Lang>(
+    () => (localStorage.getItem("lang") as Lang) || "fr",
+  );
+  const t = DICT[lang];
+
   const [tab, setTab] = useState<Tab>("youtube");
   const [url, setUrl] = useState("");
   const [kind, setKind] = useState<"video" | "audio">("video");
@@ -104,6 +170,14 @@ function App() {
   const [choice, setChoice] = useState<Record<string, string>>({});
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [dirWarn, setDirWarn] = useState(false);
+
+  function toggleLang() {
+    setLang((l) => {
+      const next = l === "fr" ? "en" : "fr";
+      localStorage.setItem("lang", next);
+      return next;
+    });
+  }
 
   useEffect(() => {
     downloadDir().then(setOutDir).catch(() => {});
@@ -161,7 +235,7 @@ function App() {
       await invoke("fetch_info", { id, url: url.trim(), kind });
       setUrl("");
     } catch (e) {
-      // Surface the failure on the card instead of leaving it stuck on "Analyse…".
+      // Surface the failure on the card instead of leaving it stuck on "fetching".
       setItems((prev) => ({
         ...prev,
         [id]: {
@@ -204,32 +278,54 @@ function App() {
     await invoke("start_download", { id: d.id, quality, outDir });
   }
 
+  // Deleting a finished item asks whether to remove the file from disk too.
+  async function removeItem(d: DownloadInfo) {
+    let deleteFile = false;
+    if (d.status === "done") {
+      deleteFile = await ask(t.askDeleteFile, { title: "TurboGrab", kind: "warning" });
+    }
+    await invoke("cancel_download", { id: d.id, deleteFile });
+  }
+
+  async function clearFinished() {
+    const deleteFiles = await ask(t.askDeleteFilesBulk, {
+      title: "TurboGrab",
+      kind: "warning",
+    });
+    await invoke("clear_finished", { deleteFiles });
+  }
+
   return (
     <div className="app">
-      <header className="topbar">
+      <header className="topbar" data-tauri-drag-region>
         <div className="brand">
           <span className="logo">
             <IconLogo />
           </span>
           <div>
             <h1>TurboGrab</h1>
-            <p>Téléchargeur — YouTube &amp; fichiers</p>
+            <p>{t.tagline}</p>
           </div>
         </div>
-        <nav className="tabs">
-          <button
-            className={tab === "youtube" ? "on" : ""}
-            onClick={() => setTab("youtube")}
-          >
-            <IconVideo /> YouTube
+        <div className="topright">
+          <button className="langtog" onClick={toggleLang} title="FR / EN">
+            {lang.toUpperCase()}
           </button>
-          <button
-            className={tab === "file" ? "on" : ""}
-            onClick={() => setTab("file")}
-          >
-            <IconFile /> Fichier
-          </button>
-        </nav>
+          <nav className="tabs">
+            <button
+              className={tab === "youtube" ? "on" : ""}
+              onClick={() => setTab("youtube")}
+            >
+              <IconVideo /> YouTube
+            </button>
+            <button
+              className={tab === "file" ? "on" : ""}
+              onClick={() => setTab("file")}
+            >
+              <IconFile /> {t.tabFile}
+            </button>
+          </nav>
+        </div>
       </header>
 
       <main className="content">
@@ -237,18 +333,14 @@ function App() {
           <div className="banner">
             <IconResume />
             <div className="banner-text">
-              <strong>
-                {interrupted.length} téléchargement
-                {interrupted.length > 1 ? "s" : ""} interrompu
-                {interrupted.length > 1 ? "s" : ""}
-              </strong>
-              <span>Reprendre là où ça s'est arrêté ?</span>
+              <strong>{t.interruptedTitle(interrupted.length)}</strong>
+              <span>{t.resumePrompt}</span>
             </div>
             <button className="btn ghost" onClick={() => setBannerDismissed(true)}>
-              Plus tard
+              {t.later}
             </button>
             <button className="btn accent" onClick={() => invoke("resume_all")}>
-              Tout reprendre
+              {t.resumeAll}
             </button>
           </div>
         )}
@@ -258,7 +350,7 @@ function App() {
             <div className="composer-row">
               <input
                 className="url"
-                placeholder="Colle une URL YouTube…"
+                placeholder={t.ytPlaceholder}
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && fetchInfo()}
@@ -268,13 +360,13 @@ function App() {
                   className={kind === "video" ? "on" : ""}
                   onClick={() => setKind("video")}
                 >
-                  <IconVideo /> Vidéo
+                  <IconVideo /> {t.video}
                 </button>
                 <button
                   className={kind === "audio" ? "on" : ""}
                   onClick={() => setKind("audio")}
                 >
-                  <IconAudio /> Audio
+                  <IconAudio /> {t.audio}
                 </button>
               </div>
               <button
@@ -282,14 +374,14 @@ function App() {
                 onClick={fetchInfo}
                 disabled={!url.trim()}
               >
-                <IconSearch /> Récupérer
+                <IconSearch /> {t.fetch}
               </button>
             </div>
           ) : (
             <div className="composer-row">
               <input
                 className="url"
-                placeholder="Colle un lien de fichier direct…"
+                placeholder={t.filePlaceholder}
                 value={fileUrl}
                 onChange={(e) => setFileUrl(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && startFile()}
@@ -299,7 +391,7 @@ function App() {
                 onClick={startFile}
                 disabled={!fileUrl.trim()}
               >
-                <IconLink /> Télécharger
+                <IconLink /> {t.download}
               </button>
             </div>
           )}
@@ -309,24 +401,22 @@ function App() {
             title={outDir}
           >
             <IconFolder />
-            <span>{outDir || "Choisir un dossier…"}</span>
-            <em>Changer</em>
+            <span>{outDir || t.chooseDir}</span>
+            <em>{t.change}</em>
           </button>
           {dirWarn && (
             <div className="errline dirwarn">
               <IconWarn />
-              <span>Choisis d'abord un dossier de destination.</span>
+              <span>{t.dirWarn}</span>
             </div>
           )}
         </section>
 
         <div className="listhead">
-          <span>
-            {visible.length} élément{visible.length > 1 ? "s" : ""}
-          </span>
+          <span>{t.itemsLabel(visible.length)}</span>
           {finishedCount > 0 && (
-            <button className="link" onClick={() => invoke("clear_finished")}>
-              <IconClear /> Effacer les terminés
+            <button className="link" onClick={clearFinished}>
+              <IconClear /> {t.clearFinished}
             </button>
           )}
         </div>
@@ -335,12 +425,8 @@ function App() {
           {visible.length === 0 && (
             <li className="empty">
               <IconDownload />
-              <p>Aucun téléchargement pour l'instant.</p>
-              <span>
-                {tab === "file"
-                  ? "Colle un lien de fichier direct ci-dessus."
-                  : "Colle une URL YouTube ci-dessus pour commencer."}
-              </span>
+              <p>{t.emptyTitle}</p>
+              <span>{tab === "file" ? t.emptyFile : t.emptyYt}</span>
             </li>
           )}
           {visible.map((d) => (
@@ -350,49 +436,40 @@ function App() {
               <div className="body">
                 <div className="line1">
                   <span className="title">{d.title || d.url}</span>
-                  <span className={`pill ${d.status}`}>{STATUS_LABEL[d.status]}</span>
+                  <span className={`pill ${d.status}`}>{t.status[d.status]}</span>
                 </div>
 
-                {/* PHASE 1 — analyse en cours */}
+                {/* fetching */}
                 {d.status === "fetching" && (
                   <div className="track indet">
                     <div className="bar" />
                   </div>
                 )}
 
-                {/* PHASE 1 — échec */}
+                {/* fetch error */}
                 {d.status === "error" && (
                   <div className="errline">
                     <IconWarn />
-                    <span>{d.error_msg || "Une erreur est survenue"}</span>
+                    <span>{d.error_msg || t.genericError}</span>
                   </div>
                 )}
 
-                {/* PHASE 2 — prêt : choix qualité */}
+                {/* ready: quality pick */}
                 {d.status === "ready" && (
                   <div className="pickrow">
-                    <label className="select">
-                      <select
-                        value={choice[d.id] ?? d.quality}
-                        onChange={(e) =>
-                          setChoice((c) => ({ ...c, [d.id]: e.target.value }))
-                        }
-                      >
-                        {d.qualities.map((q) => (
-                          <option key={q.value || "best"} value={q.value}>
-                            {d.kind === "audio" ? "🎵 " : "🎬 "}
-                            {q.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <QualitySelect
+                      d={d}
+                      value={choice[d.id] ?? d.quality}
+                      onChange={(v) => setChoice((c) => ({ ...c, [d.id]: v }))}
+                      best={t.best}
+                    />
                     <button className="btn accent" onClick={() => download(d)}>
-                      <IconDownload /> Télécharger
+                      <IconDownload /> {t.download}
                     </button>
                   </div>
                 )}
 
-                {/* PHASE 2 — barre de progression */}
+                {/* progress */}
                 {(d.status === "downloading" ||
                   d.status === "paused" ||
                   d.status === "interrupted" ||
@@ -420,7 +497,7 @@ function App() {
                 {d.status === "error" && (
                   <button
                     className="icon accent"
-                    title="Réessayer"
+                    title={t.retry}
                     onClick={() =>
                       invoke(d.kind === "file" ? "resume_download" : "retry_fetch", {
                         id: d.id,
@@ -433,7 +510,7 @@ function App() {
                 {d.status === "downloading" && (
                   <button
                     className="icon"
-                    title="Pause"
+                    title={t.pause}
                     onClick={() => invoke("pause_download", { id: d.id })}
                   >
                     <IconPause />
@@ -442,7 +519,7 @@ function App() {
                 {(d.status === "paused" || d.status === "interrupted") && (
                   <button
                     className="icon accent"
-                    title="Reprendre"
+                    title={t.resume}
                     onClick={() => invoke("resume_download", { id: d.id })}
                   >
                     <IconPlay />
@@ -450,8 +527,8 @@ function App() {
                 )}
                 <button
                   className="icon danger"
-                  title="Supprimer"
-                  onClick={() => invoke("cancel_download", { id: d.id })}
+                  title={t.delete}
+                  onClick={() => removeItem(d)}
                 >
                   <IconX />
                 </button>

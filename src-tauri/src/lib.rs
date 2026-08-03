@@ -43,6 +43,7 @@ const EXTRACTOR_ARGS: &str = "youtube:player_client=default,tv,android";
 struct Quality {
     label: String, // "1080p", "320 kbps"
     value: String, // "1080", "320" (empty = best available)
+    size: String,  // human estimate, "45.2 Mo" (empty = unknown)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -150,44 +151,103 @@ fn best_thumbnail(v: &Value) -> String {
     String::new()
 }
 
-/// Build the quality options offered to the user for this item's kind.
+/// Human-readable byte size, e.g. "45.2 Mo". Empty when unknown (<= 0).
+fn human_size(bytes: f64) -> String {
+    if bytes <= 0.0 {
+        return String::new();
+    }
+    let (v, u) = if bytes >= 1e9 {
+        (bytes / 1e9, "Go")
+    } else if bytes >= 1e6 {
+        (bytes / 1e6, "Mo")
+    } else if bytes >= 1e3 {
+        (bytes / 1e3, "Ko")
+    } else {
+        (bytes, "o")
+    };
+    format!("{v:.1} {u}")
+}
+
+/// A format's byte size — exact `filesize`, else yt-dlp's `filesize_approx`.
+fn size_of(f: &Value) -> f64 {
+    f["filesize"]
+        .as_f64()
+        .or_else(|| f["filesize_approx"].as_f64())
+        .unwrap_or(0.0)
+}
+
+/// Build the quality options offered to the user for this item's kind, each with
+/// an estimated output size.
 fn build_qualities(v: &Value, kind: &str) -> Vec<Quality> {
+    let duration = v["duration"].as_f64().unwrap_or(0.0);
+
     if kind == "audio" {
+        // Re-encoded to mp3 at the target bitrate: size ≈ bitrate × duration.
         return ["320", "192", "128"]
             .iter()
-            .map(|b| Quality {
-                label: format!("{b} kbps"),
-                value: b.to_string(),
+            .map(|b| {
+                let kbps: f64 = b.parse().unwrap_or(0.0);
+                Quality {
+                    label: format!("{b} kbps"),
+                    value: b.to_string(),
+                    size: human_size(kbps * 1000.0 / 8.0 * duration),
+                }
             })
             .collect();
     }
-    let mut heights: Vec<i64> = Vec::new();
-    if let Some(fmts) = v["formats"].as_array() {
-        for f in fmts {
+
+    let fmts = v["formats"].as_array();
+    // Video is muxed with the best audio track — add that to each height's size.
+    let best_audio = fmts
+        .map(|arr| {
+            arr.iter()
+                .filter(|f| {
+                    f["vcodec"].as_str().unwrap_or("none") == "none"
+                        && f["acodec"].as_str().unwrap_or("none") != "none"
+                })
+                .map(size_of)
+                .fold(0.0_f64, f64::max)
+        })
+        .unwrap_or(0.0);
+
+    // Largest video stream per height (proxy for the highest-bitrate variant).
+    let mut sizes: HashMap<i64, f64> = HashMap::new();
+    if let Some(arr) = fmts {
+        for f in arr {
             if f["vcodec"].as_str().unwrap_or("none") == "none" {
                 continue;
             }
             if let Some(h) = f["height"].as_i64() {
                 if h > 0 {
-                    heights.push(h);
+                    let s = size_of(f);
+                    let e = sizes.entry(h).or_insert(0.0);
+                    if s > *e {
+                        *e = s;
+                    }
                 }
             }
         }
     }
+
+    let mut heights: Vec<i64> = sizes.keys().copied().collect();
     heights.sort_unstable();
-    heights.dedup();
     heights.reverse();
     let mut out: Vec<Quality> = heights
         .into_iter()
-        .map(|h| Quality {
-            label: format!("{h}p"),
-            value: h.to_string(),
+        .map(|h| {
+            let vid = sizes.get(&h).copied().unwrap_or(0.0);
+            Quality {
+                label: format!("{h}p"),
+                value: h.to_string(),
+                size: human_size(if vid > 0.0 { vid + best_audio } else { 0.0 }),
+            }
         })
         .collect();
     if out.is_empty() {
         out.push(Quality {
             label: "Meilleure".into(),
             value: String::new(),
+            size: String::new(),
         });
     }
     out
@@ -1074,8 +1134,25 @@ fn resume_all(app: AppHandle, state: State<AppState>) -> Result<Vec<String>, Str
     Ok(ids)
 }
 
+/// Delete the finished file plus any leftover `.part` / `.meta` sidecars.
+fn remove_files(info: &DownloadInfo) {
+    if info.out_dir.is_empty() || info.title.is_empty() {
+        return;
+    }
+    let base = PathBuf::from(&info.out_dir).join(&info.title);
+    let _ = std::fs::remove_file(&base);
+    let part = PathBuf::from(&info.out_dir).join(format!("{}.part", info.title));
+    let _ = std::fs::remove_file(&part);
+    let _ = std::fs::remove_file(meta_path(&part));
+}
+
 #[tauri::command]
-fn cancel_download(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+fn cancel_download(
+    app: AppHandle,
+    state: State<AppState>,
+    id: String,
+    delete_file: bool,
+) -> Result<(), String> {
     {
         let mut items = state.items.lock().unwrap();
         if let Some(mut it) = items.remove(&id) {
@@ -1085,6 +1162,9 @@ fn cancel_download(app: AppHandle, state: State<AppState>, id: String) -> Result
             if let Some(child) = it.child.take() {
                 let _ = child.kill();
             }
+            if delete_file {
+                remove_files(&it.info);
+            }
         }
     }
     let _ = app.emit("download-removed", id);
@@ -1093,10 +1173,25 @@ fn cancel_download(app: AppHandle, state: State<AppState>, id: String) -> Result
 }
 
 #[tauri::command]
-fn clear_finished(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+fn clear_finished(
+    app: AppHandle,
+    state: State<AppState>,
+    delete_files: bool,
+) -> Result<(), String> {
     {
         let mut items = state.items.lock().unwrap();
-        items.retain(|_, it| it.info.status != "done" && it.info.status != "error");
+        let done: Vec<String> = items
+            .values()
+            .filter(|it| it.info.status == "done" || it.info.status == "error")
+            .map(|it| it.info.id.clone())
+            .collect();
+        for id in done {
+            if let Some(it) = items.remove(&id) {
+                if delete_files {
+                    remove_files(&it.info);
+                }
+            }
+        }
     }
     save(&app);
     Ok(())
