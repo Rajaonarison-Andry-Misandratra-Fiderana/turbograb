@@ -13,10 +13,11 @@
 // "interrupted" record that can be resumed from the `.part` file.
 
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -299,6 +300,10 @@ fn build_args(info: &DownloadInfo, ffmpeg_dir: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "--newline".into(),
         "--no-playlist".into(),
+        // Download fragments (DASH/HLS) in parallel — real speedup on the
+        // segmented formats YouTube serves.
+        "--concurrent-fragments".into(),
+        "4".into(),
         "-c".into(), // continue partial files = resume
         "-o".into(),
         format!("{}/%(title)s.%(ext)s", info.out_dir),
@@ -594,6 +599,45 @@ fn fail_file(app: &AppHandle, id: &str, msg: &str) {
     save(app);
 }
 
+// Multi-connection acceleration: split a range-capable download into parallel
+// segments over separate HTTP connections (the IDM/aria2 trick — sidesteps the
+// per-connection bandwidth cap many servers apply). Falls back to a single
+// stream when the server doesn't advertise byte ranges or the size is small.
+const CONNECTIONS: usize = 6;
+const MIN_SEGMENTED: u64 = 4 * 1024 * 1024; // below 4 MiB, one connection is plenty
+
+/// Per-segment completed byte counts, persisted next to the `.part` so a paused
+/// segmented download resumes each connection from where it stopped.
+#[derive(Serialize, Deserialize)]
+struct SegMeta {
+    total: u64,
+    done: Vec<u64>,
+}
+
+fn meta_path(part: &Path) -> PathBuf {
+    let mut s = part.as_os_str().to_os_string();
+    s.push(".meta");
+    PathBuf::from(s)
+}
+
+fn load_meta(path: &Path, total: u64, conn: usize) -> Vec<u64> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<SegMeta>(&b).ok())
+        .filter(|m| m.total == total && m.done.len() == conn)
+        .map(|m| m.done)
+        .unwrap_or_else(|| vec![0; conn])
+}
+
+fn save_meta(path: &Path, total: u64, done: &[u64]) {
+    if let Ok(json) = serde_json::to_vec(&SegMeta {
+        total,
+        done: done.to_vec(),
+    }) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 /// Returns Ok(true) when the file completed, Ok(false) when paused/cancelled.
 async fn run_file_download(
     app: &AppHandle,
@@ -615,20 +659,53 @@ async fn run_file_download(
         .build()
         .map_err(|e| e.to_string())?;
 
-    // If a name was already chosen on a prior run, a `.part` may exist — resume
-    // from its size.
-    let mut part_path = if title.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(&out_dir).join(format!("{title}.part")))
+    // One HEAD probe: total size + byte-range support (+ a filename if the
+    // server sends Content-Disposition here).
+    let head = client.head(&url).send().await.ok();
+    let (total, ranges_ok) = match &head {
+        Some(r) if r.status().is_success() => {
+            let ranges = r
+                .headers()
+                .get(reqwest::header::ACCEPT_RANGES)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.contains("bytes"))
+                .unwrap_or(false);
+            (r.content_length(), ranges)
+        }
+        _ => (None, false),
     };
-    let existing: u64 = part_path
-        .as_ref()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len())
-        .unwrap_or(0);
 
-    let mut req = client.get(&url);
+    if title.is_empty() {
+        title = head
+            .as_ref()
+            .and_then(filename_from_disposition)
+            .or_else(|| filename_from_url(&url))
+            .unwrap_or_else(|| "fichier".into());
+        set_title(app, id, &title); // persist so a later resume reuses this name
+    }
+    let part = PathBuf::from(&out_dir).join(format!("{title}.part"));
+    let final_path = PathBuf::from(&out_dir).join(&title);
+
+    match total {
+        Some(t) if ranges_ok && t >= MIN_SEGMENTED => {
+            run_segmented(app, id, &client, &url, &part, &final_path, t, cancel).await
+        }
+        _ => run_single(app, id, &client, &url, &part, &final_path, cancel).await,
+    }
+}
+
+/// Single connection. Resumes from the current `.part` size via a Range request.
+async fn run_single(
+    app: &AppHandle,
+    id: &str,
+    client: &reqwest::Client,
+    url: &str,
+    part: &Path,
+    final_path: &Path,
+    cancel: Arc<AtomicBool>,
+) -> Result<bool, String> {
+    let existing = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
+    let mut req = client.get(url);
     if existing > 0 {
         req = req.header(reqwest::header::RANGE, format!("bytes={existing}-"));
     }
@@ -636,18 +713,6 @@ async fn run_file_download(
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status().as_u16()));
     }
-
-    // First run: settle the filename now (Content-Disposition wins, else URL).
-    if title.is_empty() {
-        title = filename_from_disposition(&resp)
-            .or_else(|| filename_from_url(&url))
-            .unwrap_or_else(|| "fichier".into());
-        part_path = Some(PathBuf::from(&out_dir).join(format!("{title}.part")));
-        set_title(app, id, &title); // persist so a later resume reuses this name
-    }
-    let part_path = part_path.unwrap();
-    let final_path = PathBuf::from(&out_dir).join(&title);
-
     let resumed = existing > 0 && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
     // content_length() is the remaining bytes on a 206 — add what's on disk.
     let total = resp
@@ -660,12 +725,12 @@ async fn run_file_download(
         .write(true)
         .append(resumed)
         .truncate(!resumed)
-        .open(&part_path)
+        .open(part)
         .map_err(|e| e.to_string())?;
 
     let mut downloaded = if resumed { existing } else { 0 };
     let mut stream = resp.bytes_stream();
-    let mut last = std::time::Instant::now();
+    let mut last = Instant::now();
     let mut last_bytes = downloaded;
 
     while let Some(chunk) = stream.next().await {
@@ -676,7 +741,7 @@ async fn run_file_download(
         file.write_all(&chunk).map_err(|e| e.to_string())?;
         downloaded += chunk.len() as u64;
 
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         let dt = now.duration_since(last).as_secs_f64();
         if dt >= 0.25 {
             let speed = (downloaded - last_bytes) as f64 / dt;
@@ -687,7 +752,128 @@ async fn run_file_download(
     }
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
-    std::fs::rename(&part_path, &final_path).map_err(|e| e.to_string())?;
+    std::fs::rename(part, final_path).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Parallel segments over `CONNECTIONS` connections, each writing its own slice
+/// of a pre-sized `.part`. Resumable via the `.meta` sidecar.
+async fn run_segmented(
+    app: &AppHandle,
+    id: &str,
+    client: &reqwest::Client,
+    url: &str,
+    part: &Path,
+    final_path: &Path,
+    total: u64,
+    cancel: Arc<AtomicBool>,
+) -> Result<bool, String> {
+    // Don't spawn more connections than there are megabytes to fetch.
+    let conn = CONNECTIONS.min((total / (1024 * 1024)).max(1) as usize).max(1);
+    let meta = meta_path(part);
+    let done0 = load_meta(&meta, total, conn);
+
+    // Pre-size the target so each segment can seek to its offset and write.
+    let need_create = std::fs::metadata(part).map(|m| m.len() != total).unwrap_or(true);
+    if need_create {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(part)
+            .map_err(|e| e.to_string())?;
+        f.set_len(total).map_err(|e| e.to_string())?;
+    }
+
+    let base = total / conn as u64;
+    let downloaded = Arc::new(AtomicU64::new(done0.iter().sum()));
+    let done: Arc<Vec<AtomicU64>> =
+        Arc::new(done0.iter().map(|&d| AtomicU64::new(d)).collect());
+    // (last emit time, bytes at last emit) — throttles UI updates across tasks.
+    let progress = Arc::new(Mutex::new((Instant::now(), downloaded.load(Ordering::Relaxed))));
+
+    let mut tasks = Vec::with_capacity(conn);
+    for i in 0..conn {
+        let start = i as u64 * base;
+        let end = if i == conn - 1 { total } else { (i as u64 + 1) * base }; // exclusive
+        let seg_len = end - start;
+        let already = done0[i];
+
+        let client = client.clone();
+        let url = url.to_string();
+        let part = part.to_path_buf();
+        let meta = meta.clone();
+        let cancel = cancel.clone();
+        let downloaded = downloaded.clone();
+        let done = done.clone();
+        let progress = progress.clone();
+        let app = app.clone();
+        let id = id.to_string();
+
+        // NB: a single async block reused across loop iterations => one future
+        // type, so join_all over the Vec type-checks without boxing.
+        tasks.push(async move {
+            if already >= seg_len {
+                return Ok::<(), String>(()); // this segment already finished
+            }
+            let from = start + already;
+            let to = end - 1; // Range end is inclusive
+            let resp = client
+                .get(&url)
+                .header(reqwest::header::RANGE, format!("bytes={from}-{to}"))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if !resp.status().is_success() {
+                return Err(format!("HTTP {}", resp.status().as_u16()));
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&part)
+                .map_err(|e| e.to_string())?;
+            file.seek(SeekFrom::Start(from)).map_err(|e| e.to_string())?;
+
+            let mut seg_done = already;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(()); // paused — offsets are persisted by the throttle below
+                }
+                let chunk = chunk.map_err(|e| e.to_string())?;
+                file.write_all(&chunk).map_err(|e| e.to_string())?;
+                let n = chunk.len() as u64;
+                seg_done += n;
+                done[i].store(seg_done, Ordering::Relaxed);
+                let tot = downloaded.fetch_add(n, Ordering::Relaxed) + n;
+
+                let mut p = progress.lock().unwrap();
+                let dt = p.0.elapsed().as_secs_f64();
+                if dt >= 0.25 {
+                    let speed = (tot - p.1) as f64 / dt;
+                    *p = (Instant::now(), tot);
+                    drop(p);
+                    update_file_progress(&app, &id, tot, total, speed);
+                    let snap: Vec<u64> = done.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+                    save_meta(&meta, total, &snap);
+                }
+            }
+            Ok(())
+        });
+    }
+
+    let results = futures_util::future::join_all(tasks).await;
+    for r in &results {
+        if let Err(e) = r {
+            return Err(e.clone());
+        }
+    }
+
+    let snap: Vec<u64> = done.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+    if cancel.load(Ordering::Relaxed) {
+        save_meta(&meta, total, &snap); // paused — keep offsets for resume
+        return Ok(false);
+    }
+    std::fs::rename(part, final_path).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&meta);
     Ok(true)
 }
 
