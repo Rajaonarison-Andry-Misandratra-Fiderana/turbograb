@@ -13,13 +13,14 @@
 // "interrupted" record that can be resumed from the `.part` file.
 
 use std::collections::HashMap;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use futures_util::StreamExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::menu::{Menu, MenuItem};
@@ -367,7 +368,7 @@ fn build_args(info: &DownloadInfo, ffmpeg_dir: Option<&str>) -> Vec<String> {
         // Download fragments (DASH/HLS) in parallel — real speedup on the
         // segmented formats YouTube serves.
         "--concurrent-fragments".into(),
-        "4".into(),
+        "8".into(),
         "-c".into(), // continue partial files = resume
         "-o".into(),
         format!("{}/%(title)s.%(ext)s", info.out_dir),
@@ -667,8 +668,16 @@ fn fail_file(app: &AppHandle, id: &str, msg: &str) {
 // segments over separate HTTP connections (the IDM/aria2 trick — sidesteps the
 // per-connection bandwidth cap many servers apply). Falls back to a single
 // stream when the server doesn't advertise byte ranges or the size is small.
-const CONNECTIONS: usize = 6;
+const CONNECTIONS: usize = 8;
 const MIN_SEGMENTED: u64 = 4 * 1024 * 1024; // below 4 MiB, one connection is plenty
+// Work-stealing granularity: the file is diced into many CHUNK-sized ranges and
+// CONNECTIONS workers pull the next range as soon as they free up. Small pieces
+// keep every connection busy to the very end instead of stalling on one slow
+// segment's tail (the equal-split failure mode).
+const CHUNK: u64 = 4 * 1024 * 1024;
+// Userspace write buffer per segment — coalesces the ~16 KiB reqwest chunks into
+// larger, less frequent syscalls.
+const WRITE_BUF: usize = 256 * 1024;
 
 /// Per-segment completed byte counts, persisted next to the `.part` so a paused
 /// segmented download resumes each connection from where it stopped.
@@ -684,13 +693,13 @@ fn meta_path(part: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn load_meta(path: &Path, total: u64, conn: usize) -> Vec<u64> {
+fn load_meta(path: &Path, total: u64, chunks: usize) -> Vec<u64> {
     std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice::<SegMeta>(&b).ok())
-        .filter(|m| m.total == total && m.done.len() == conn)
+        .filter(|m| m.total == total && m.done.len() == chunks)
         .map(|m| m.done)
-        .unwrap_or_else(|| vec![0; conn])
+        .unwrap_or_else(|| vec![0; chunks])
 }
 
 fn save_meta(path: &Path, total: u64, done: &[u64]) {
@@ -784,13 +793,15 @@ async fn run_single(
         .map(|l| if resumed { l + existing } else { l })
         .unwrap_or(0);
 
-    let mut file = std::fs::OpenOptions::new()
+    let file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .append(resumed)
         .truncate(!resumed)
         .open(part)
+        .await
         .map_err(|e| e.to_string())?;
+    let mut file = tokio::io::BufWriter::with_capacity(WRITE_BUF, file);
 
     let mut downloaded = if resumed { existing } else { 0 };
     let mut stream = resp.bytes_stream();
@@ -799,10 +810,12 @@ async fn run_single(
 
     while let Some(chunk) = stream.next().await {
         if cancel.load(Ordering::Relaxed) {
+            // Flush buffered bytes so the `.part` length matches what resume reads.
+            file.flush().await.map_err(|e| e.to_string())?;
             return Ok(false); // keep the `.part` so resume can continue
         }
         let chunk = chunk.map_err(|e| e.to_string())?;
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
         downloaded += chunk.len() as u64;
 
         let now = Instant::now();
@@ -814,7 +827,7 @@ async fn run_single(
             last_bytes = downloaded;
         }
     }
-    file.flush().map_err(|e| e.to_string())?;
+    file.flush().await.map_err(|e| e.to_string())?;
     drop(file);
     std::fs::rename(part, final_path).map_err(|e| e.to_string())?;
     Ok(true)
@@ -832,12 +845,13 @@ async fn run_segmented(
     total: u64,
     cancel: Arc<AtomicBool>,
 ) -> Result<bool, String> {
-    // Don't spawn more connections than there are megabytes to fetch.
-    let conn = CONNECTIONS.min((total / (1024 * 1024)).max(1) as usize).max(1);
+    // Dice the file into fixed CHUNK-sized ranges. `done[i]` tracks bytes already
+    // on disk for chunk i (0 = untouched) so a paused download resumes each piece.
+    let nchunks = total.div_ceil(CHUNK) as usize;
     let meta = meta_path(part);
-    let done0 = load_meta(&meta, total, conn);
+    let done0 = load_meta(&meta, total, nchunks);
 
-    // Pre-size the target so each segment can seek to its offset and write.
+    // Pre-size the target so each worker can seek to a chunk's offset and write.
     let need_create = std::fs::metadata(part).map(|m| m.len() != total).unwrap_or(true);
     if need_create {
         let f = std::fs::OpenOptions::new()
@@ -848,20 +862,21 @@ async fn run_segmented(
         f.set_len(total).map_err(|e| e.to_string())?;
     }
 
-    let base = total / conn as u64;
     let downloaded = Arc::new(AtomicU64::new(done0.iter().sum()));
     let done: Arc<Vec<AtomicU64>> =
         Arc::new(done0.iter().map(|&d| AtomicU64::new(d)).collect());
-    // (last emit time, bytes at last emit) — throttles UI updates across tasks.
-    let progress = Arc::new(Mutex::new((Instant::now(), downloaded.load(Ordering::Relaxed))));
+    // Work-stealing cursor: each worker grabs the next unclaimed chunk index.
+    let next = Arc::new(AtomicUsize::new(0));
+    // Lock-free UI throttle: `last_emit` holds nanos-since-start of the last emit,
+    // `last_bytes` the total at that point. Whoever wins the CAS emits — no Mutex
+    // in the per-chunk hot path.
+    let start = Instant::now();
+    let last_emit = Arc::new(AtomicU64::new(0));
+    let last_bytes = Arc::new(AtomicU64::new(downloaded.load(Ordering::Relaxed)));
 
-    let mut tasks = Vec::with_capacity(conn);
-    for i in 0..conn {
-        let start = i as u64 * base;
-        let end = if i == conn - 1 { total } else { (i as u64 + 1) * base }; // exclusive
-        let seg_len = end - start;
-        let already = done0[i];
-
+    let workers = CONNECTIONS.min(nchunks).max(1);
+    let mut tasks = Vec::with_capacity(workers);
+    for _ in 0..workers {
         let client = client.clone();
         let url = url.to_string();
         let part = part.to_path_buf();
@@ -869,58 +884,92 @@ async fn run_segmented(
         let cancel = cancel.clone();
         let downloaded = downloaded.clone();
         let done = done.clone();
-        let progress = progress.clone();
+        let next = next.clone();
+        let last_emit = last_emit.clone();
+        let last_bytes = last_bytes.clone();
         let app = app.clone();
         let id = id.to_string();
 
-        // NB: a single async block reused across loop iterations => one future
-        // type, so join_all over the Vec type-checks without boxing.
+        // One async block reused across workers => one future type, so join_all
+        // over the Vec type-checks without boxing.
         tasks.push(async move {
-            if already >= seg_len {
-                return Ok::<(), String>(()); // this segment already finished
-            }
-            let from = start + already;
-            let to = end - 1; // Range end is inclusive
-            let resp = client
-                .get(&url)
-                .header(reqwest::header::RANGE, format!("bytes={from}-{to}"))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            if !resp.status().is_success() {
-                return Err(format!("HTTP {}", resp.status().as_u16()));
-            }
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&part)
-                .map_err(|e| e.to_string())?;
-            file.seek(SeekFrom::Start(from)).map_err(|e| e.to_string())?;
-
-            let mut seg_done = already;
-            let mut stream = resp.bytes_stream();
-            while let Some(chunk) = stream.next().await {
+            loop {
                 if cancel.load(Ordering::Relaxed) {
-                    return Ok(()); // paused — offsets are persisted by the throttle below
+                    return Ok::<(), String>(());
                 }
-                let chunk = chunk.map_err(|e| e.to_string())?;
-                file.write_all(&chunk).map_err(|e| e.to_string())?;
-                let n = chunk.len() as u64;
-                seg_done += n;
-                done[i].store(seg_done, Ordering::Relaxed);
-                let tot = downloaded.fetch_add(n, Ordering::Relaxed) + n;
+                // Claim the next chunk. Past the end => this worker is finished.
+                let idx = next.fetch_add(1, Ordering::Relaxed);
+                if idx >= nchunks {
+                    return Ok(());
+                }
+                let cstart = idx as u64 * CHUNK;
+                let cend = ((idx as u64 + 1) * CHUNK).min(total); // exclusive
+                let clen = cend - cstart;
+                let already = done[idx].load(Ordering::Relaxed);
+                if already >= clen {
+                    continue; // resumed chunk already complete
+                }
 
-                let mut p = progress.lock().unwrap();
-                let dt = p.0.elapsed().as_secs_f64();
-                if dt >= 0.25 {
-                    let speed = (tot - p.1) as f64 / dt;
-                    *p = (Instant::now(), tot);
-                    drop(p);
-                    update_file_progress(&app, &id, tot, total, speed);
-                    let snap: Vec<u64> = done.iter().map(|a| a.load(Ordering::Relaxed)).collect();
-                    save_meta(&meta, total, &snap);
+                let from = cstart + already;
+                let to = cend - 1; // Range end is inclusive
+                let resp = client
+                    .get(&url)
+                    .header(reqwest::header::RANGE, format!("bytes={from}-{to}"))
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if !resp.status().is_success() {
+                    return Err(format!("HTTP {}", resp.status().as_u16()));
                 }
+                let file = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&part)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut file = tokio::io::BufWriter::with_capacity(WRITE_BUF, file);
+                file.seek(SeekFrom::Start(from)).await.map_err(|e| e.to_string())?;
+
+                // `seg_done` counts bytes handed to the buffer; `done[idx]` is only
+                // advanced after a flush, so the persisted meta never claims bytes
+                // that haven't reached the OS yet (safe resume).
+                let mut seg_done = already;
+                let mut stream = resp.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    if cancel.load(Ordering::Relaxed) {
+                        file.flush().await.map_err(|e| e.to_string())?;
+                        done[idx].store(seg_done, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    let chunk = chunk.map_err(|e| e.to_string())?;
+                    file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+                    let n = chunk.len() as u64;
+                    seg_done += n;
+                    let tot = downloaded.fetch_add(n, Ordering::Relaxed) + n;
+
+                    // Throttle: only the CAS winner emits + persists, ~4x/sec total.
+                    let now = start.elapsed().as_nanos() as u64;
+                    let prev = last_emit.load(Ordering::Relaxed);
+                    if now.saturating_sub(prev) >= 250_000_000
+                        && last_emit
+                            .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                    {
+                        // Flush our buffer before recording progress on disk so meta
+                        // stays <= actual bytes written.
+                        file.flush().await.map_err(|e| e.to_string())?;
+                        done[idx].store(seg_done, Ordering::Relaxed);
+                        let dt = (now - prev) as f64 / 1e9;
+                        let prev_bytes = last_bytes.swap(tot, Ordering::Relaxed);
+                        let speed = (tot.saturating_sub(prev_bytes)) as f64 / dt;
+                        update_file_progress(&app, &id, tot, total, speed);
+                        let snap: Vec<u64> =
+                            done.iter().map(|a| a.load(Ordering::Relaxed)).collect();
+                        save_meta(&meta, total, &snap);
+                    }
+                }
+                file.flush().await.map_err(|e| e.to_string())?;
+                done[idx].store(clen, Ordering::Relaxed); // chunk fully on disk
             }
-            Ok(())
         });
     }
 

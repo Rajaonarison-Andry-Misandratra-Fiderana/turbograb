@@ -29,4 +29,6 @@ serde_json = "1"
 # we want raw bytes so Content-Length matches what we write.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 futures-util = "0.3"
+# Async file I/O so segment writes don't block the shared async-runtime threads.
+tokio = { version = "1", features = ["fs", "io-util"] }
 
