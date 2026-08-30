@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- TurboGrab mark. Minimal: two shapes, two colours, generous padding.
+       A solid arrow dropping into an open tray — the tray is what makes it read
+       as "download into" rather than a generic down-arrow, and it survives at
+       32px where fine detail would not.
+       Accent matches the App.css accent token so icon and UI are one thing. -->
+  <defs>
+    <linearGradient id="jet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#79DAFF"/>
+      <stop offset="1" stop-color="#2BA6F5"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="496" height="496" rx="116" fill="#17171A"/>
+
+  <g fill="url(#jet)">
+    <rect x="218" y="92" width="76" height="150" rx="38"/>
+    <path d="M164 224 H348 L256 334 Z"/>
+  </g>
+
+  <path d="M136 352 V386 A26 26 0 0 0 162 412 H350 A26 26 0 0 0 376 386 V352"
+        fill="none" stroke="#FFFFFF" stroke-width="30" stroke-linecap="round"/>
+</svg>
