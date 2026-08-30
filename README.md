@@ -10,11 +10,10 @@ A desktop download manager that works out what your link is, then downloads it
 as fast as the server allows — YouTube video and audio, or any direct file, in
 one list.
 
-<a href="#install"><img alt="Platform" src="https://img.shields.io/badge/Linux-%C2%B7%20Windows%20%C2%B7%20macOS-0b7285?style=flat-square" /></a>
+<a href="#install"><img alt="Platform" src="https://img.shields.io/badge/platform-Linux-0b7285?style=flat-square&logo=linux&logoColor=white" /></a>
 <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white" />
 <img alt="Rust" src="https://img.shields.io/badge/Rust-core-CE422B?style=flat-square&logo=rust&logoColor=white" />
 <img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black" />
-<img alt="Offline" src="https://img.shields.io/badge/works-offline--first-2f9e44?style=flat-square" />
 
 <br />
 
@@ -67,20 +66,18 @@ keep running. Errors are one plain sentence, with the raw diagnostic tucked into
 **Settings → Log** for when you actually want it.
 
 Light and dark follow your system. French and English throughout, units and
-dates included. Nothing is fetched at runtime — fonts and every binary it runs
-are bundled.
+dates included.
 
 <a name="install"></a>
 
 ## Install
 
-### Linux
-
-Native install under `~/.local` — no root, no package manager. You get both a
-`turbograb` command and an app-launcher entry.
+Linux only. Native install under `~/.local` — no root, no package manager.
+You get both a `turbograb` command and an app-launcher entry.
 
 ```bash
-git clone https://github.com/<you>/turbograb && cd turbograb
+git clone https://github.com/Rajaonarison-Andry-Misandratra-Fiderana/turbograb
+cd turbograb
 npm install
 ./scripts/fetch-sidecars.sh linux     # yt-dlp + static ffmpeg/ffprobe
 ./scripts/install.sh --build
@@ -100,12 +97,6 @@ The sidecars sit in a private lib dir rather than `~/.local/bin` so they can
 live next to the executable — `.sidecar()` resolves against `<exe_dir>` —
 without `ffmpeg`/`ffprobe`/`yt-dlp` colliding with whatever is already on your
 PATH.
-
-### Windows / macOS
-
-Build an installer with `npm run tauri build`; see **[Packaging](#packaging)**.
-The Windows installer needs nothing preinstalled — the WebView2 runtime is
-embedded.
 
 ### Where your data lives
 
@@ -146,12 +137,11 @@ produce a light-themed dialog on a dark window.
 Fetch them with the script rather than by hand:
 
 ```bash
-scripts/fetch-sidecars.sh              # linux + windows
-scripts/fetch-sidecars.sh linux        # one platform
+scripts/fetch-sidecars.sh linux
 FORCE=1 scripts/fetch-sidecars.sh      # refresh what's already there
 ```
 
-It writes `src-tauri/binaries/<stem>-<triple>[.exe]` for `yt-dlp`, `ffmpeg` and
+It writes `src-tauri/binaries/<stem>-<triple>` for `yt-dlp`, `ffmpeg` and
 `ffprobe`, then fails if `ldd` finds a shared `libav` link.
 
 > **Never copy a distro ffmpeg in here.** That was done once: those binaries
@@ -169,16 +159,13 @@ It writes `src-tauri/binaries/<stem>-<triple>[.exe]` for `yt-dlp`, `ffmpeg` and
 
 ## Packaging
 
-| Target | Artifact | Needs anything installed? |
-| --- | --- | --- |
-| Linux | `.AppImage` | **No** — bundles webkit2gtk and all three sidecars |
-| Linux | `.deb` | Yes — declares `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libayatana-appindicator3-1` |
-| Windows | NSIS `.exe` | **No** — `webviewInstallMode: offlineInstaller` embeds the WebView2 runtime |
-| macOS | `.dmg` | No — WKWebView ships with the OS (sidecars for the darwin triples still needed) |
+| Artifact | Needs anything installed? |
+| --- | --- |
+| `.AppImage` | **No** — bundles webkit2gtk and all three sidecars |
+| `.deb` | Yes — declares `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `libayatana-appindicator3-1` |
 
 ```bash
 APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 npm run tauri build -- --bundles deb,appimage
-npm run tauri build -- --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
 ```
 
 Before shipping `src-tauri/target/release/ytfetcher`, check it is a real release
@@ -188,45 +175,6 @@ build. A dev build can sit at that same path and look identical, but starts with
 ```bash
 strings -a src-tauri/target/release/ytfetcher | grep -c 'assets/index-'   # 1+ = frontend embedded
 ```
-
-<details>
-<summary><b>Cross-building the Windows installer from Linux</b></summary>
-
-Two things it needs on the host.
-
-**The WebView2 offline runtime** (~212 MB) is downloaded to
-`~/.cache/tauri/x64/MicrosoftEdgeWebView2RuntimeInstaller.exe` on first build.
-Tauri's own downloader can sit there writing nothing; plain `curl` works, and
-the file is reused once present:
-
-```bash
-curl -fL --retry 8 -C - -o ~/.cache/tauri/x64/MicrosoftEdgeWebView2RuntimeInstaller.exe \
-  'https://go.microsoft.com/fwlink/?linkid=2124701'
-```
-
-**`makensis`**, which Arch does not package. Extract Debian's instead — no root
-needed. It hardcodes `/usr/share/nsis` for its stubs, and tauri does not forward
-`NSISDIR`, so it has to be wrapped:
-
-```bash
-curl -sLO http://ftp.debian.org/debian/pool/main/n/nsis/nsis_3.12-1_amd64.deb
-curl -sLO http://ftp.debian.org/debian/pool/main/n/nsis/nsis-common_3.12-1_all.deb
-mkdir -p nsisroot && for d in *.deb; do ar x "$d" && tar -xf data.tar.* -C nsisroot; done
-
-mkdir -p nsisroot/wrap
-printf '#!/bin/sh\nexport NSISDIR=%s/usr/share/nsis\nexec %s/usr/bin/makensis "$@"\n' \
-  "$PWD/nsisroot" "$PWD/nsisroot" > nsisroot/wrap/makensis
-chmod +x nsisroot/wrap/makensis
-ln -sf makensis nsisroot/wrap/makensis.exe   # tauri looks for the .exe name
-
-PATH="$PWD/nsisroot/wrap:$PATH" NSIS_PATH="$PWD/nsisroot/usr/share/nsis" \
-  npm run tauri build -- --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
-```
-
-The resulting `TurboGrab_0.1.0_x64-setup.exe` is ~281 MB and unsigned — Windows
-SmartScreen will warn until it is code-signed on a Windows host.
-
-</details>
 
 <details>
 <summary><b>Regenerating the icons</b></summary>
