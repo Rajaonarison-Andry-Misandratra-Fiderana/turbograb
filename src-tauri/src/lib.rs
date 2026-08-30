@@ -103,7 +103,13 @@ struct DownloadInfo {
     /// Completion per bucket, 0-100, at most `SEG_BUCKETS` entries — the shape
     /// of the transfer across its parallel connections. Live only: cleared
     /// before every write to disk (see `save`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Always serialized, empty included. `skip_serializing_if` was tried here
+    /// to save a few bytes and made the field vanish from the payload whenever
+    /// it was empty — which is every yt-dlp download — so the UI read
+    /// `undefined.length` and the render threw. The wire shape must not depend
+    /// on the value.
+    #[serde(default)]
     segments: Vec<u8>,
     /// When the item entered the list. The list sorts on this, so a card never
     /// jumps position just because its status changed.
@@ -2326,6 +2332,94 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the wire contract ----------------------------------------------
+
+    #[test]
+    fn every_download_info_field_is_always_serialized() {
+        // The UI types this payload as fully populated. A field that vanishes
+        // when it happens to be empty reaches JS as `undefined`, and the first
+        // property access on it throws during render — which is exactly what
+        // `skip_serializing_if` on `segments` caused.
+        let json = serde_json::to_value(DownloadInfo::blank()).unwrap();
+        let obj = json.as_object().expect("serializes to an object");
+        for field in [
+            "id", "url", "kind", "out_dir", "title", "thumbnail", "qualities",
+            "quality", "percent", "speed", "eta", "error_msg", "error_detail",
+            "status", "total_bytes", "downloaded_bytes", "connections",
+            "resumable", "speed_bps", "eta_secs", "retry", "retry_max",
+            "segments", "file_path", "started_at", "finished_at", "created_at",
+            "duration", "uploader",
+        ] {
+            assert!(obj.contains_key(field), "`{field}` missing from the payload");
+        }
+    }
+
+    #[test]
+    fn a_pre_existing_downloads_file_still_loads() {
+        // Only the fields the first release wrote. Upgrading must not wipe a
+        // user's history.
+        let legacy = r#"{
+            "id": "abc", "url": "https://example.com/x", "kind": "file",
+            "out_dir": "/tmp", "title": "x", "thumbnail": "", "qualities": [],
+            "quality": "", "percent": 12.5, "speed": "", "eta": "",
+            "error_msg": "", "status": "paused"
+        }"#;
+        let info: DownloadInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(info.id, "abc");
+        assert_eq!(info.percent, 12.5);
+        assert!(info.segments.is_empty());
+        assert_eq!(info.retry_max, 0); // load() repairs this
+    }
+
+    // ---- error classification -------------------------------------------
+
+    #[test]
+    fn classify_maps_transport_failures_to_network() {
+        // The real shape of it: yt-dlp wraps a Python exception, reqwest nests
+        // its own. Both must collapse to the same code.
+        let ytdlp = "[youtube] K_o2ejRHLws: Unable to download API page: \
+HTTPSConnection(host='www.youtube.com', port=443): Failed to resolve \
+'www.youtube.com' ([Errno -3] Temporary failure in name resolution)";
+        assert_eq!(classify(ytdlp, "@analyze_failed"), "@network");
+        assert_eq!(
+            classify("error sending request for url (…): dns error", "@download_failed"),
+            "@network"
+        );
+        assert_eq!(classify("Connection reset by peer", "@download_failed"), "@network");
+    }
+
+    #[test]
+    fn classify_covers_every_category() {
+        let cases = [
+            ("Sign in to confirm you're not a bot", "@blocked"),
+            ("Video unavailable", "@not_found"),
+            ("HTTP 404 Not Found", "@not_found"),
+            ("HTTP 429 Too Many Requests", "@rate_limited"),
+            ("Unsupported URL: https://example.com/x", "@unsupported"),
+            ("HTTP 503", "@server"),
+            ("Bad gateway", "@server"),
+            ("No space left on device", "@no_space"),
+            ("Permission denied (os error 13)", "@no_write"),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(classify(raw, "@download_failed"), want, "for {raw:?}");
+        }
+    }
+
+    #[test]
+    fn classify_passes_our_own_codes_through() {
+        // A code from our own paths must survive untouched, or `is_fatal`
+        // stops recognising it and a dead link would be retried five times.
+        assert_eq!(classify("@link_expired", "@download_failed"), "@link_expired");
+        assert_eq!(classify("@no_ffmpeg", "@analyze_failed"), "@no_ffmpeg");
+    }
+
+    #[test]
+    fn classify_falls_back_rather_than_leaking_raw_text() {
+        let weird = "yt-dlp said something nobody anticipated";
+        assert_eq!(classify(weird, "@analyze_failed"), "@analyze_failed");
+    }
 
     // ---- filenames --------------------------------------------------------
 

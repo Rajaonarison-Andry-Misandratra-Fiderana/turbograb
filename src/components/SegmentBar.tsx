@@ -8,8 +8,16 @@ import { tok } from "../theme";
  *  The backend already tracked this per 4 MiB chunk to make resume work; it
  *  just never left the process. Buckets are capped at 48 so a 100 GB file
  *  costs the same to send and draw as a 100 MB one. */
-export function SegmentBar({ segments, label }: { segments: number[]; label: string }) {
-  if (segments.length < 2) return null;
+export function SegmentBar({
+  segments,
+  label,
+}: {
+  segments: number[] | undefined;
+  label: string;
+}) {
+  // Defensive: an item restored from disk, or one from an older backend, has
+  // no segments at all. A missing bar is fine; a thrown render is not.
+  if (!segments || segments.length < 2) return null;
   return (
     <Tooltip title={label}>
       <Box

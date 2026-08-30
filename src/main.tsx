@@ -7,6 +7,7 @@ import ReactDOM from "react-dom/client";
 import CssBaseline from "@mui/material/CssBaseline";
 import { ThemeProvider } from "@mui/material/styles";
 import App from "./App";
+import { CrashScreen } from "./components/CrashScreen";
 import { theme } from "./theme";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
@@ -21,7 +22,9 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
       {/* enableColorScheme so the webview's own scrollbars and form controls
           follow the scheme too, not just our components. */}
       <CssBaseline enableColorScheme />
-      <App />
+      <CrashScreen>
+        <App />
+      </CrashScreen>
     </ThemeProvider>
   </React.StrictMode>,
 );
