@@ -29,15 +29,11 @@ import { errorText } from "../errors";
 import { MetaLine } from "./MetaLine";
 import { QualityPicker } from "./QualityPicker";
 import { SegmentBar } from "./SegmentBar";
-import { StatusChip } from "./StatusChip";
 import { Thumb } from "./Thumb";
 import * as fmt from "../format";
 import { tok } from "../theme";
 import type { Dict, Lang } from "../i18n";
-import { isExpired, type DownloadInfo, type Status } from "../types";
-
-/** Statuses whose only signal is the badge. */
-const BADGED = new Set<Status>(["downloading", "paused", "interrupted", "done"]);
+import { isExpired, type DownloadInfo } from "../types";
 
 export interface CardActions {
   start: (d: DownloadInfo, quality: string) => void;
@@ -142,12 +138,6 @@ export function DownloadCard({
             </Tooltip>
             <MetaLine parts={meta} />
           </Stack>
-          {/* The badge only earns its space for states nothing else on the card
-              shows. Fetching has its indeterminate bar, ready has the quality
-              picker and its button, error has the alert with the message. */}
-          {BADGED.has(d.status) && (
-            <StatusChip status={d.status} label={t.status[d.status]} />
-          )}
           <Stack direction="row" spacing={0.5} sx={{ flexShrink: 0 }}>
             {primary ? (
               <Tooltip title={primary.label}>
