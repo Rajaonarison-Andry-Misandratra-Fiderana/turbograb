@@ -30,5 +30,10 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 futures-util = "0.3"
 # Async file I/O so segment writes don't block the shared async-runtime threads.
-tokio = { version = "1", features = ["fs", "io-util"] }
+# `time` powers the retry backoff between failed segment attempts.
+tokio = { version = "1", features = ["fs", "io-util", "time"] }
+
+[dev-dependencies]
+# Test-only runtime so `probe()` can be driven against a throwaway HTTP server.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 

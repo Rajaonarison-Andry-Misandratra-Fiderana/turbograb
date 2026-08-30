@@ -1,549 +1,414 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { open, ask } from "@tauri-apps/plugin-dialog";
-import { downloadDir } from "@tauri-apps/api/path";
-import {
-  IconAudio,
-  IconClear,
-  IconDownload,
-  IconFile,
-  IconFolder,
-  IconLink,
-  IconLogo,
-  IconPause,
-  IconPlay,
-  IconResume,
-  IconSearch,
-  IconVideo,
-  IconWarn,
-  IconX,
-} from "./icons";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import Box from "@mui/material/Box";
+import Chip from "@mui/material/Chip";
+import IconButton from "@mui/material/IconButton";
+import InputAdornment from "@mui/material/InputAdornment";
+import Snackbar from "@mui/material/Snackbar";
+import Stack from "@mui/material/Stack";
+import Typography from "@mui/material/Typography";
+import TextField from "@mui/material/TextField";
+import Tooltip from "@mui/material/Tooltip";
+import { useColorScheme } from "@mui/material/styles";
+import ClearOutlined from "@mui/icons-material/ClearOutlined";
+import DeleteSweepOutlined from "@mui/icons-material/DeleteSweepOutlined";
+import DownloadOutlined from "@mui/icons-material/DownloadOutlined";
+import DownloadingOutlined from "@mui/icons-material/DownloadingOutlined";
+import SearchOutlined from "@mui/icons-material/SearchOutlined";
+import SettingsOutlined from "@mui/icons-material/SettingsOutlined";
+
+import { Composer } from "./components/Composer";
+import { ConfirmDialog, type ConfirmSpec } from "./components/ConfirmDialog";
+import { DownloadCard, type CardActions } from "./components/DownloadCard";
+import { EmptyState } from "./components/EmptyState";
+import { LogDialog } from "./components/LogDialog";
+import { ResizeHandles } from "./components/ResizeHandles";
+import { ResumeBanner } from "./components/ResumeBanner";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { TitleBar } from "./components/TitleBar";
+import { errorText } from "./errors";
+import { useDownloads } from "./hooks/useDownloads";
 import { DICT, type Lang } from "./i18n";
-import "./App.css";
+import type { Source } from "./source";
+import { isFinished, type DownloadInfo } from "./types";
 
-type Status =
-  | "fetching"
-  | "ready"
-  | "downloading"
-  | "paused"
-  | "interrupted"
-  | "done"
-  | "error";
+/** Page gutter, in theme spacing units (8px each). */
+const GUTTER = 2.5;
 
-interface Quality {
-  label: string;
-  value: string;
-  size: string;
-}
-
-type Tab = "youtube" | "file";
-
-interface DownloadInfo {
-  id: string;
-  url: string;
-  kind: "video" | "audio" | "file";
+interface Settings {
   out_dir: string;
-  title: string;
-  thumbnail: string;
-  qualities: Quality[];
-  quality: string;
-  percent: number;
-  speed: string;
-  eta: string;
-  error_msg: string;
-  status: Status;
+  lang: string;
+  theme: string;
+  tray_hint_shown: boolean;
 }
 
-const ORDER: Record<Status, number> = {
-  fetching: 0,
-  ready: 1,
-  downloading: 2,
-  interrupted: 3,
-  paused: 4,
-  error: 5,
-  done: 6,
-};
-
-function Thumb({ d }: { d: DownloadInfo }) {
-  if (d.thumbnail) {
-    return (
-      <span className="thumb img">
-        <img src={d.thumbnail} alt="" loading="lazy" />
-      </span>
-    );
-  }
-  return (
-    <span className={`thumb ${d.kind}`}>
-      {d.kind === "audio" ? (
-        <IconAudio />
-      ) : d.kind === "file" ? (
-        <IconFile />
-      ) : (
-        <IconVideo />
-      )}
-    </span>
-  );
-}
-
-// Custom quality picker: label on the left, estimated size right-aligned.
-// A native <select> can't right-align per-option text, hence the popover.
-function QualitySelect({
-  d,
-  value,
-  onChange,
-  best,
-}: {
-  d: DownloadInfo;
-  value: string;
-  onChange: (v: string) => void;
-  best: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
-
-  const prefix = d.kind === "audio" ? "🎵 " : "🎬 ";
-  const labelOf = (q: Quality) => (q.value === "" ? best : q.label);
-  const cur = d.qualities.find((q) => q.value === value) ?? d.qualities[0];
-
-  return (
-    <div className={`qsel${open ? " open" : ""}`} ref={ref}>
-      <button
-        type="button"
-        className="qsel-btn"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="qsel-label">
-          {prefix}
-          {cur ? labelOf(cur) : ""}
-        </span>
-        {cur?.size && <span className="qsel-size">{cur.size}</span>}
-        <span className="qsel-caret">▾</span>
-      </button>
-      {open && (
-        <ul className="qsel-list">
-          {d.qualities.map((q) => (
-            <li key={q.value || "best"}>
-              <button
-                type="button"
-                className={q.value === value ? "on" : ""}
-                onClick={() => {
-                  onChange(q.value);
-                  setOpen(false);
-                }}
-              >
-                <span className="qsel-label">
-                  {prefix}
-                  {labelOf(q)}
-                </span>
-                {q.size && <span className="qsel-size">{q.size}</span>}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function App() {
-  const [lang, setLang] = useState<Lang>(
-    () => (localStorage.getItem("lang") as Lang) || "fr",
-  );
+export default function App() {
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const lang: Lang = settings?.lang === "en" ? "en" : "fr";
   const t = DICT[lang];
-  // Backend sends fixed messages as "@code"; translate those, show the rest raw.
-  const errText = (msg: string) =>
-    msg.startsWith("@")
-      ? t.errors[msg.slice(1)] ?? t.genericError
-      : msg || t.genericError;
+  const { mode } = useColorScheme();
 
-  const [tab, setTab] = useState<Tab>("youtube");
-  const [url, setUrl] = useState("");
-  const [kind, setKind] = useState<"video" | "audio">("video");
-  const [fileUrl, setFileUrl] = useState("");
-  const [outDir, setOutDir] = useState("");
-  const [items, setItems] = useState<Record<string, DownloadInfo>>({});
-  const [choice, setChoice] = useState<Record<string, string>>({});
-  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [query, setQuery] = useState("");
   const [dirWarn, setDirWarn] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
+  const [toast, setToast] = useState("");
+  const [present, setPresent] = useState<Record<string, boolean>>({});
 
-  function toggleLang() {
-    setLang((l) => {
-      const next = l === "fr" ? "en" : "fr";
-      localStorage.setItem("lang", next);
-      return next;
-    });
-  }
+  const { list, failLocally } = useDownloads(
+    useCallback((d: DownloadInfo) => setToast(DICT[lang].toastDone(d.title || d.url)), [lang]),
+  );
 
+  // ---- settings: one round-trip on mount, then write-through ----
   useEffect(() => {
-    downloadDir().then(setOutDir).catch(() => {});
-    invoke<DownloadInfo[]>("list_downloads").then((list) =>
-      setItems(Object.fromEntries(list.map((d) => [d.id, d]))),
-    );
-
-    const unUpd = listen<DownloadInfo>("download-update", (e) =>
-      setItems((prev) => ({ ...prev, [e.payload.id]: e.payload })),
-    );
-    const unDel = listen<string>("download-removed", (e) =>
-      setItems((prev) => {
-        const next = { ...prev };
-        delete next[e.payload];
-        return next;
-      }),
-    );
-    return () => {
-      unUpd.then((f) => f());
-      unDel.then((f) => f());
-    };
+    invoke<Settings>("get_settings").then(setSettings).catch(() => {});
   }, []);
 
-  const list = useMemo(
-    () => Object.values(items).sort((a, b) => ORDER[a.status] - ORDER[b.status]),
-    [items],
-  );
-  // Each tab shows only its own downloads: YouTube (video/audio) vs direct files.
-  const visible = useMemo(
-    () => list.filter((d) => (tab === "file" ? d.kind === "file" : d.kind !== "file")),
-    [list, tab],
-  );
-  const interrupted = list.filter((d) => d.status === "interrupted");
-  const finishedCount = list.filter(
-    (d) => d.status === "done" || d.status === "error",
-  ).length;
+  // The window starts hidden (tauri.conf.json) and is revealed once React has
+  // painted. A borderless window has no native background to fall back on, so
+  // showing it earlier means a flash of the wrong colour in one scheme or the
+  // other; waiting for the first frame is right for both.
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      getCurrentWindow().show().catch(() => {});
+    });
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
-  async function pickDir() {
-    const dir = await open({ directory: true, defaultPath: outDir });
+  const patchSettings = useCallback((next: Partial<Settings>) => {
+    setSettings((cur) => {
+      if (!cur) return cur;
+      const merged = { ...cur, ...next };
+      invoke("set_settings", { settings: merged }).catch(() => {});
+      return merged;
+    });
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.lang = lang;
+  }, [lang]);
+
+  // The colour scheme is owned by MUI (it has to be readable before React
+  // mounts). Mirror it into settings.json so one file holds every preference.
+  const lastMode = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!settings || !mode || mode === lastMode.current) return;
+    lastMode.current = mode;
+    if (settings.theme !== mode) patchSettings({ theme: mode });
+  }, [mode, settings, patchSettings]);
+
+  const outDir = settings?.out_dir ?? "";
+
+  // ---- derived views ----
+  // One list: the tab split is gone, so a counter can no longer disagree with
+  // what is on screen. Only the search box narrows what is shown.
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter(
+      (d) => d.title.toLowerCase().includes(q) || d.url.toLowerCase().includes(q),
+    );
+  }, [list, query]);
+
+  const downloading = useMemo(
+    () => list.filter((d) => d.status === "downloading"),
+    [list],
+  );
+  const interrupted = useMemo(
+    () => list.filter((d) => d.status === "interrupted"),
+    [list],
+  );
+  const finished = useMemo(() => list.filter(isFinished), [list]);
+
+  // ---- which finished files are still on disk ----
+  const doneIds = useMemo(
+    () => list.filter((d) => d.status === "done").map((d) => d.id),
+    [list],
+  );
+  const doneKey = doneIds.join(",");
+  useEffect(() => {
+    if (!doneIds.length) return setPresent({});
+    invoke<boolean[]>("files_present", { ids: doneIds })
+      .then((flags) =>
+        setPresent(Object.fromEntries(doneIds.map((id, i) => [id, flags[i]]))),
+      )
+      .catch(() => {});
+    // doneKey is the stable identity of doneIds; depending on the array itself
+    // would refire on every list update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doneKey]);
+
+  // ---- actions ----
+  const pickDir = async () => {
+    const dir = await openDialog({ directory: true, defaultPath: outDir || undefined });
     if (typeof dir === "string") {
-      setOutDir(dir);
+      patchSettings({ out_dir: dir });
       setDirWarn(false);
     }
-  }
+  };
 
-  async function fetchInfo() {
-    if (!url.trim()) return;
-    // No folder = the download would silently fail later. Warn up front.
-    if (!outDir) {
-      setDirWarn(true);
-      return;
-    }
+  // Commands reject with the same "@code" vocabulary the cards use, so a failed
+  // action reads the same wherever it surfaces.
+  const fail = (e: unknown) => setToast(errorText(String(e), t));
+
+  const submit = async (url: string, source: Source) => {
+    if (!outDir) return setDirWarn(true);
     const id = crypto.randomUUID();
     try {
-      await invoke("fetch_info", { id, url: url.trim(), kind });
-      setUrl("");
+      if (source === "file") {
+        await invoke("start_file_download", { id, url, outDir });
+      } else {
+        await invoke("fetch_info", { id, url, kind: source });
+      }
     } catch (e) {
-      // Surface the failure on the card instead of leaving it stuck on "fetching".
-      setItems((prev) => ({
-        ...prev,
-        [id]: {
-          ...(prev[id] ?? ({ id, url: url.trim(), kind } as DownloadInfo)),
-          status: "error",
-          error_msg: String(e),
-        } as DownloadInfo,
-      }));
+      // Surface it on a card instead of leaving the user with nothing.
+      failLocally({ id, url, kind: source }, e);
     }
-  }
+  };
 
-  async function startFile() {
-    if (!fileUrl.trim()) return;
-    if (!outDir) {
-      setDirWarn(true);
-      return;
-    }
-    const id = crypto.randomUUID();
-    try {
-      await invoke("start_file_download", { id, url: fileUrl.trim(), outDir });
-      setFileUrl("");
-    } catch (e) {
-      setItems((prev) => ({
-        ...prev,
-        [id]: {
-          ...(prev[id] ?? ({ id, url: fileUrl.trim(), kind: "file" } as DownloadInfo)),
-          status: "error",
-          error_msg: String(e),
-        } as DownloadInfo,
-      }));
-    }
-  }
+  const actions: CardActions = {
+    start: (d, quality) => {
+      if (!outDir) return setDirWarn(true);
+      invoke("start_download", { id: d.id, quality, outDir }).catch(fail);
+    },
+    pause: (d) => {
+      const run = () => invoke("pause_download", { id: d.id }).catch(fail);
+      // A server that ignores Range makes "pause" mean "throw away the bytes".
+      if (d.resumable === false) {
+        setConfirm({
+          title: t.pause,
+          body: t.notResumable,
+          confirmLabel: t.pause,
+          cancelLabel: t.cancelAction,
+          destructive: true,
+          onConfirm: run,
+        });
+      } else run();
+    },
+    resume: (d) => invoke("resume_download", { id: d.id }).catch(fail),
+    retry: (d) =>
+      invoke(d.kind === "file" ? "resume_download" : "retry_fetch", { id: d.id }).catch(fail),
+    relink: (d, url) => invoke("refresh_link", { id: d.id, url }).catch(fail),
+    openFile: (d) => invoke("open_file", { id: d.id }).catch(fail),
+    revealFile: (d) => invoke("reveal_file", { id: d.id }).catch(fail),
+    copy: (text) => {
+      navigator.clipboard.writeText(text).then(
+        () => setToast(t.copied),
+        () => {},
+      );
+    },
+    remove: (d) => {
+      const running = !isFinished(d) && d.status !== "ready";
+      setConfirm({
+        title: running ? t.confirmStopTitle : t.confirmRemoveTitle,
+        body: running ? t.confirmStopBody : t.confirmRemoveBody,
+        confirmLabel: running ? t.confirmStop : t.confirmRemove,
+        cancelLabel: t.cancelAction,
+        // Offer the file deletion only when there is a file to delete.
+        checkboxLabel:
+          d.status === "done" || d.percent > 0 ? t.alsoDeleteFile : undefined,
+        destructive: running,
+        onConfirm: (deleteFile) =>
+          invoke("cancel_download", { id: d.id, deleteFile }).catch(fail),
+      });
+    },
+  };
 
-  async function download(d: DownloadInfo) {
-    if (!outDir) {
-      setDirWarn(true);
-      return;
-    }
-    const quality = choice[d.id] ?? d.quality;
-    await invoke("start_download", { id: d.id, quality, outDir });
-  }
-
-  // Deleting a finished item asks whether to remove the file from disk too.
-  async function removeItem(d: DownloadInfo) {
-    let deleteFile = false;
-    if (d.status === "done") {
-      deleteFile = await ask(t.askDeleteFile, { title: "TurboGrab", kind: "warning" });
-    }
-    await invoke("cancel_download", { id: d.id, deleteFile });
-  }
-
-  async function clearFinished() {
-    const deleteFiles = await ask(t.askDeleteFilesBulk, {
-      title: "TurboGrab",
-      kind: "warning",
+  const clearFinished = () => {
+    setConfirm({
+      title: t.confirmClearTitle,
+      body: t.confirmClearBody(finished.length),
+      confirmLabel: t.confirmClear,
+      cancelLabel: t.cancelAction,
+      checkboxLabel: t.alsoDeleteFiles,
+      onConfirm: (deleteFiles) => {
+        invoke("clear_finished", { deleteFiles }).catch(fail);
+      },
     });
-    await invoke("clear_finished", { deleteFiles });
-  }
+  };
 
   return (
-    <div className="app">
-      <header className="topbar" data-tauri-drag-region>
-        <div className="brand">
-          <span className="logo">
-            <IconLogo />
-          </span>
-          <div>
-            <h1>TurboGrab</h1>
-            <p>{t.tagline}</p>
-          </div>
-        </div>
-        <div className="topright">
-          <button className="langtog" onClick={toggleLang} title="FR / EN">
-            {lang.toUpperCase()}
-          </button>
-          <nav className="tabs">
-            <button
-              className={tab === "youtube" ? "on" : ""}
-              onClick={() => setTab("youtube")}
-            >
-              <IconVideo /> YouTube
-            </button>
-            <button
-              className={tab === "file" ? "on" : ""}
-              onClick={() => setTab("file")}
-            >
-              <IconFile /> {t.tabFile}
-            </button>
-          </nav>
-        </div>
-      </header>
+    <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <ResizeHandles />
 
-      <main className="content">
-        {interrupted.length > 0 && !bannerDismissed && (
-          <div className="banner">
-            <IconResume />
-            <div className="banner-text">
-              <strong>{t.interruptedTitle(interrupted.length)}</strong>
-              <span>{t.resumePrompt}</span>
-            </div>
-            <button className="btn ghost" onClick={() => setBannerDismissed(true)}>
-              {t.later}
-            </button>
-            <button className="btn accent" onClick={() => invoke("resume_all")}>
-              {t.resumeAll}
-            </button>
-          </div>
-        )}
+      <TitleBar
+        closeLabel={t.close}
+        actions={
+          downloading.length > 0 && (
+            <Tooltip title={t.activeSummary(downloading.length)}>
+              <Chip
+                size="small"
+                color="primary"
+                icon={<DownloadingOutlined />}
+                label={downloading.length}
+                sx={{ fontVariantNumeric: "tabular-nums" }}
+              />
+            </Tooltip>
+          )
+        }
+      />
 
-        <section className="composer">
-          {tab === "youtube" ? (
-            <div className="composer-row">
-              <input
-                className="url"
-                placeholder={t.ytPlaceholder}
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && fetchInfo()}
-              />
-              <div className="segment">
-                <button
-                  className={kind === "video" ? "on" : ""}
-                  onClick={() => setKind("video")}
-                >
-                  <IconVideo /> {t.video}
-                </button>
-                <button
-                  className={kind === "audio" ? "on" : ""}
-                  onClick={() => setKind("audio")}
-                >
-                  <IconAudio /> {t.audio}
-                </button>
-              </div>
-              <button
-                className="btn accent lg"
-                onClick={fetchInfo}
-                disabled={!url.trim()}
-              >
-                <IconSearch /> {t.fetch}
-              </button>
-            </div>
-          ) : (
-            <div className="composer-row">
-              <input
-                className="url"
-                placeholder={t.filePlaceholder}
-                value={fileUrl}
-                onChange={(e) => setFileUrl(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && startFile()}
-              />
-              <button
-                className="btn accent lg"
-                onClick={startFile}
-                disabled={!fileUrl.trim()}
-              >
-                <IconLink /> {t.download}
-              </button>
-            </div>
-          )}
-          <button
-            className={`dir${dirWarn ? " warn" : ""}`}
-            onClick={pickDir}
-            title={outDir}
+      {/* Outside the scroll area on purpose: pasting a link must never require
+          scrolling back up past a long list. */}
+      {/* One gutter value on all four sides of the content column: the page
+          padding, the gap between composer and list, and the space under the
+          last card are all the same 20px. */}
+      <Box sx={{ px: GUTTER, pt: GUTTER, flexShrink: 0 }}>
+        <Box sx={{ maxWidth: 720, mx: "auto" }}>
+          <Composer
+            t={t}
+            outDir={outDir}
+            dirWarn={dirWarn}
+            onPickDir={pickDir}
+            onSubmit={submit}
+          />
+        </Box>
+      </Box>
+
+      {/* The flex chain runs all the way down to EmptyState, which is what lets
+          it fill the leftover height and centre inside it. */}
+      <Box
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          px: GUTTER,
+          pt: GUTTER,
+          pb: GUTTER,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <Box
+          sx={{
+            maxWidth: 720,
+            width: "100%",
+            mx: "auto",
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <ResumeBanner
+            count={bannerDismissed ? 0 : interrupted.length}
+            t={t}
+            onDismiss={() => setBannerDismissed(true)}
+            onResumeAll={() => invoke("resume_all").catch(fail)}
+          />
+
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{ mb: 2, alignItems: "center", flexShrink: 0 }}
           >
-            <IconFolder />
-            <span>{outDir || t.chooseDir}</span>
-            <em>{t.change}</em>
-          </button>
-          {dirWarn && (
-            <div className="errline dirwarn">
-              <IconWarn />
-              <span>{t.dirWarn}</span>
-            </div>
-          )}
-        </section>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              noWrap
+              sx={{ flex: 1, minWidth: 0 }}
+            >
+              {list.length > 0 && t.summary(list.length, downloading.length)}
+            </Typography>
+            {list.length > 1 && (
+              <TextField
+                placeholder={t.search}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                sx={{ width: 200 }}
+                slotProps={{
+                  input: {
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <SearchOutlined fontSize="small" />
+                      </InputAdornment>
+                    ),
+                    endAdornment: query ? (
+                      <InputAdornment position="end">
+                        <IconButton
+                          size="small"
+                          aria-label={t.clearSearch}
+                          onClick={() => setQuery("")}
+                        >
+                          <ClearOutlined fontSize="small" />
+                        </IconButton>
+                      </InputAdornment>
+                    ) : null,
+                  },
+                }}
+              />
+            )}
+            {finished.length > 0 && (
+              <Tooltip title={t.clearFinished}>
+                <IconButton aria-label={t.clearFinished} onClick={clearFinished}>
+                  <DeleteSweepOutlined />
+                </IconButton>
+              </Tooltip>
+            )}
+            <Tooltip title={t.settings}>
+              <IconButton aria-label={t.settings} onClick={() => setSettingsOpen(true)}>
+                <SettingsOutlined />
+              </IconButton>
+            </Tooltip>
+          </Stack>
 
-        <div className="listhead">
-          <span>{t.itemsLabel(visible.length)}</span>
-          {finishedCount > 0 && (
-            <button className="link" onClick={clearFinished}>
-              <IconClear /> {t.clearFinished}
-            </button>
-          )}
-        </div>
+          <Stack
+            component="ul"
+            spacing={1.5}
+            sx={{ m: 0, p: 0, flex: 1, display: "flex", flexDirection: "column" }}
+          >
+            {visible.length === 0 &&
+              (list.length === 0 ? (
+                <EmptyState
+                  icon={<DownloadOutlined />}
+                  title={t.emptyTitle}
+                  hint={t.emptyHint}
+                />
+              ) : (
+                <EmptyState icon={<SearchOutlined />} title={t.noMatch} hint={query} />
+              ))}
+            {visible.map((d) => (
+              <DownloadCard
+                key={d.id}
+                d={d}
+                t={t}
+                lang={lang}
+                filePresent={present[d.id]}
+                actions={actions}
+              />
+            ))}
+          </Stack>
+        </Box>
+      </Box>
 
-        <ul className="list">
-          {visible.length === 0 && (
-            <li className="empty">
-              <IconDownload />
-              <p>{t.emptyTitle}</p>
-              <span>{tab === "file" ? t.emptyFile : t.emptyYt}</span>
-            </li>
-          )}
-          {visible.map((d) => (
-            <li key={d.id} className={`card ${d.status}`}>
-              <Thumb d={d} />
-
-              <div className="body">
-                <div className="line1">
-                  <span className="title">{d.title || d.url}</span>
-                  <span className={`pill ${d.status}`}>{t.status[d.status]}</span>
-                </div>
-
-                {/* fetching */}
-                {d.status === "fetching" && (
-                  <div className="track indet">
-                    <div className="bar" />
-                  </div>
-                )}
-
-                {/* fetch error */}
-                {d.status === "error" && (
-                  <div className="errline">
-                    <IconWarn />
-                    <span>{errText(d.error_msg)}</span>
-                  </div>
-                )}
-
-                {/* ready: quality pick */}
-                {d.status === "ready" && (
-                  <div className="pickrow">
-                    <QualitySelect
-                      d={d}
-                      value={choice[d.id] ?? d.quality}
-                      onChange={(v) => setChoice((c) => ({ ...c, [d.id]: v }))}
-                      best={t.best}
-                    />
-                    <button className="btn accent" onClick={() => download(d)}>
-                      <IconDownload /> {t.download}
-                    </button>
-                  </div>
-                )}
-
-                {/* progress */}
-                {(d.status === "downloading" ||
-                  d.status === "paused" ||
-                  d.status === "interrupted" ||
-                  d.status === "done") && (
-                  <>
-                    <div className="track">
-                      <div
-                        className="bar"
-                        style={{ width: `${Math.min(d.percent, 100)}%` }}
-                      />
-                    </div>
-                    <div className="line2">
-                      <span>{d.percent.toFixed(d.percent < 100 ? 1 : 0)}%</span>
-                      {d.status === "downloading" && (
-                        <span>
-                          {d.speed} · ETA {d.eta}
-                        </span>
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
-
-              <div className="tools">
-                {d.status === "error" && (
-                  <button
-                    className="icon accent"
-                    title={t.retry}
-                    onClick={() =>
-                      invoke(d.kind === "file" ? "resume_download" : "retry_fetch", {
-                        id: d.id,
-                      })
-                    }
-                  >
-                    <IconResume />
-                  </button>
-                )}
-                {d.status === "downloading" && (
-                  <button
-                    className="icon"
-                    title={t.pause}
-                    onClick={() => invoke("pause_download", { id: d.id })}
-                  >
-                    <IconPause />
-                  </button>
-                )}
-                {(d.status === "paused" || d.status === "interrupted") && (
-                  <button
-                    className="icon accent"
-                    title={t.resume}
-                    onClick={() => invoke("resume_download", { id: d.id })}
-                  >
-                    <IconPlay />
-                  </button>
-                )}
-                <button
-                  className="icon danger"
-                  title={t.delete}
-                  onClick={() => removeItem(d)}
-                >
-                  <IconX />
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      </main>
-    </div>
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        t={t}
+        lang={lang}
+        setLang={(l) => patchSettings({ lang: l })}
+        outDir={outDir}
+        onPickDir={pickDir}
+        onOpenLogs={() => setLogsOpen(true)}
+      />
+      <LogDialog
+        open={logsOpen}
+        onClose={() => setLogsOpen(false)}
+        t={t}
+        lang={lang}
+        onCopy={actions.copy}
+      />
+      <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />
+      <Snackbar
+        open={!!toast}
+        message={toast}
+        autoHideDuration={4000}
+        onClose={() => setToast("")}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      />
+    </Box>
   );
 }
-
-export default App;

@@ -1,10 +1,35 @@
 <!doctype html>
-<html lang="en">
+<html lang="fr">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/svg+xml" href="/turbograb.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TurboGrab</title>
+    <style>
+      /* Painted before React mounts, so the window never flashes white on a
+         dark desktop. Must match the theme's background.default values. */
+      :root { background: #f6fafe; }
+      :root[data-mui-color-scheme="dark"] { background: #0f1417; }
+    </style>
+    <script>
+      // Resolve the colour scheme before first paint. Reads the same key MUI's
+      // ThemeProvider writes (modeStorageKey in main.tsx) and sets the same
+      // attribute its colorSchemeSelector: "data" expects.
+      (function () {
+        try {
+          var mode = localStorage.getItem("turbograb.mode") || "system";
+          var dark =
+            mode === "dark" ||
+            (mode === "system" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          var root = document.documentElement;
+          root.setAttribute("data-mui-color-scheme", dark ? "dark" : "light");
+          root.style.colorScheme = dark ? "dark" : "light";
+        } catch (e) {
+          /* private mode, storage disabled: fall through to the light default */
+        }
+      })();
+    </script>
   </head>
 
   <body>
