@@ -19,7 +19,7 @@ mod download;
 mod server;
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -303,10 +303,51 @@ fn clear_log(state: State<AppState>) {
 
 // ---- persistence ----------------------------------------------------------
 
-fn state_file(app: &AppHandle) -> Option<PathBuf> {
+/// The app's data directory, created if missing and readable only by its owner.
+///
+/// Both files in here are secrets: `settings.json` holds the pairing token that
+/// gates the local API, `downloads.json` the request headers the extension sent
+/// — cookies and Authorization among them. On a shared machine the default
+/// 0755/0644 hands every other account both.
+fn data_dir(app: &AppHandle) -> Option<PathBuf> {
     let dir = app.path().app_data_dir().ok()?;
     let _ = std::fs::create_dir_all(&dir);
-    Some(dir.join("downloads.json"))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Some(dir)
+}
+
+/// Write a file no other account can read.
+///
+/// The mode is set at creation rather than chmod'ed afterwards: a chmod leaves a
+/// window, however short, in which the token sits on disk world-readable. An
+/// existing file keeps the mode it was first created with, hence the re-assert —
+/// which is also what repairs a settings.json written by an earlier build.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
+    }
+}
+
+fn state_file(app: &AppHandle) -> Option<PathBuf> {
+    Some(data_dir(app)?.join("downloads.json"))
 }
 
 fn save(app: &AppHandle) {
@@ -325,7 +366,8 @@ fn save(app: &AppHandle) {
         i.segments.clear();
     }
     if let Ok(json) = serde_json::to_vec_pretty(&infos) {
-        let _ = std::fs::write(path, json);
+        // Private: the persisted headers are the browser's own cookies.
+        let _ = write_private(&path, &json);
     }
 }
 
@@ -370,9 +412,7 @@ fn load(app: &AppHandle) {
 }
 
 fn settings_file(app: &AppHandle) -> Option<PathBuf> {
-    let dir = app.path().app_data_dir().ok()?;
-    let _ = std::fs::create_dir_all(&dir);
-    Some(dir.join("settings.json"))
+    Some(data_dir(app)?.join("settings.json"))
 }
 
 fn load_settings(app: &AppHandle) {
@@ -405,8 +445,10 @@ pub fn save_settings(app: &AppHandle) {
     };
     // Write-then-rename: a crash mid-write must not leave a truncated file
     // that resets every preference on the next launch.
+    // The temp file is created private too — the rename would otherwise carry a
+    // world-readable token into place.
     let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, json).is_ok() {
+    if write_private(&tmp, &json).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
 }
@@ -1355,5 +1397,28 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(active_count(&items), 2);
+    }
+
+    // ---- secrets on disk -------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_holding_a_secret_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tg-priv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+
+        // A file an earlier build left world-readable must be repaired, not
+        // just written into — hence the pre-existing 0644.
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private(&path, br#"{"token":"s3cret"}"#).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the pairing token would be readable by other accounts");
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"token":"s3cret"}"#);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
