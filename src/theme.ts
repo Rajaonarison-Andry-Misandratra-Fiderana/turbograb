@@ -46,8 +46,8 @@ declare module "@mui/material/styles" {
 }
 
 // Inter: tall x-height and open apertures, which is what keeps 12-13px
-// metadata legible. The stack degrades for titles in scripts the latin subset
-// doesn't cover — a YouTube title can be in anything.
+// metadata legible. The stack degrades for filenames in scripts the latin
+// subset doesn't cover — a server-supplied name can be in anything.
 const FONT =
   '"Inter Variable", Inter, system-ui, -apple-system, "Segoe UI", "Noto Sans", sans-serif';
 

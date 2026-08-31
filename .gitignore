@@ -26,8 +26,3 @@ dist-ssr
 *.sw?
 zest.md
 AGENTS.md
-
-# Sidecar binaries — ~366 MB of static ffmpeg/ffprobe/yt-dlp builds.
-# Fetched, not stored: scripts/fetch-sidecars.sh pulls them per target triple.
-src-tauri/binaries/*
-!src-tauri/binaries/.gitkeep

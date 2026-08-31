@@ -16,7 +16,6 @@ import Typography from "@mui/material/Typography";
 import BugReportOutlined from "@mui/icons-material/BugReportOutlined";
 import ContentCopyOutlined from "@mui/icons-material/ContentCopyOutlined";
 import DeleteOutlineOutlined from "@mui/icons-material/DeleteOutlineOutlined";
-import DownloadOutlined from "@mui/icons-material/DownloadOutlined";
 import FolderOpenOutlined from "@mui/icons-material/FolderOpenOutlined";
 import LinkOutlined from "@mui/icons-material/LinkOutlined";
 import MoreVertOutlined from "@mui/icons-material/MoreVertOutlined";
@@ -27,7 +26,6 @@ import RefreshOutlined from "@mui/icons-material/RefreshOutlined";
 
 import { errorText } from "../errors";
 import { MetaLine } from "./MetaLine";
-import { QualityPicker } from "./QualityPicker";
 import { SegmentBar } from "./SegmentBar";
 import { Thumb } from "./Thumb";
 import * as fmt from "../format";
@@ -36,7 +34,6 @@ import type { Dict, Lang } from "../i18n";
 import { isExpired, type DownloadInfo } from "../types";
 
 export interface CardActions {
-  start: (d: DownloadInfo, quality: string) => void;
   pause: (d: DownloadInfo) => void;
   resume: (d: DownloadInfo) => void;
   retry: (d: DownloadInfo) => void;
@@ -47,9 +44,9 @@ export interface CardActions {
   copy: (text: string) => void;
 }
 
-/** Every status renders the same four slots — thumbnail, title + status,
- *  metadata, progress — so the eye lands in the same place on every card and
- *  the action column never changes width. */
+/** Every status renders the same four slots — file type, title, metadata,
+ *  progress — so the eye lands in the same place on every card and the action
+ *  column never changes width. */
 export function DownloadCard({
   d,
   t,
@@ -64,7 +61,6 @@ export function DownloadCard({
   filePresent?: boolean;
   actions: CardActions;
 }) {
-  const [quality, setQuality] = useState(d.quality);
   const [newUrl, setNewUrl] = useState("");
   const [menu, setMenu] = useState<HTMLElement | null>(null);
 
@@ -74,15 +70,14 @@ export function DownloadCard({
   const showsProgress =
     d.status === "downloading" || d.status === "paused" || d.status === "interrupted";
 
-  // Identity of the item, same slot whatever the status.
-  const meta =
-    d.kind === "file"
-      ? [fmt.host(d.url), d.resumable === false && t.notResumable]
-      : [
-          d.uploader,
-          fmt.duration(d.duration),
-          d.quality && (d.kind === "audio" ? `${d.quality} kbps` : `${d.quality}p`),
-        ];
+  // Identity of the item, same slot whatever the status. `viaBrowser` is worth
+  // a word: a card that appeared while the window was hidden should say where
+  // it came from rather than look like a ghost.
+  const meta = [
+    fmt.host(d.url),
+    d.source === "browser" && t.viaBrowser,
+    d.resumable === false && t.notResumable,
+  ];
 
   // Numbers, same slot whatever the status.
   const stats = showsProgress
@@ -101,7 +96,7 @@ export function DownloadCard({
       : [];
 
   const primary =
-    d.status === "downloading"
+    d.status === "downloading" || d.status === "queued"
       ? { icon: <PauseOutlined />, label: t.pause, run: () => actions.pause(d) }
       : d.status === "paused" || d.status === "interrupted"
         ? { icon: <PlayArrowOutlined />, label: t.resume, run: () => actions.resume(d) }
@@ -161,20 +156,15 @@ export function DownloadCard({
           </Stack>
         </Stack>
 
-        {d.status === "fetching" && <LinearProgress aria-label={t.status.fetching} />}
-
-        {d.status === "ready" && (
-          <Stack direction="row" spacing={1}>
-            <QualityPicker d={d} value={quality} onChange={setQuality} t={t} lang={lang} />
-            <Button
-              variant="contained"
-              startIcon={<DownloadOutlined />}
-              onClick={() => actions.start(d, quality)}
-              sx={{ flexShrink: 0 }}
-            >
-              {t.download}
-            </Button>
-          </Stack>
+        {/* Queued: an indeterminate bar and one word, so a card that is doing
+            nothing yet still says why. */}
+        {d.status === "queued" && (
+          <Box>
+            <LinearProgress aria-label={t.status.queued} />
+            <Typography variant="caption" color="text.secondary">
+              {t.queuedHint}
+            </Typography>
+          </Box>
         )}
 
         {showsProgress && (
@@ -199,8 +189,8 @@ export function DownloadCard({
         )}
 
         {d.status === "error" && (
-          // `severity` carries the meaning; the text stays selectable so a raw
-          // yt-dlp message can be copied into a bug report.
+          // `severity` carries the meaning; the text stays selectable so the
+          // message can be copied into a bug report.
           <Alert
             severity={expired ? "warning" : "error"}
             sx={{ "& .MuiAlert-message": { userSelect: "text" } }}

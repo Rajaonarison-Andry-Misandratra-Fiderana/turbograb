@@ -7,9 +7,9 @@ import RestartAltOutlined from "@mui/icons-material/RestartAltOutlined";
 import { tok } from "../theme";
 import type { Dict } from "../i18n";
 
-/** Offered only when the *visible* tab actually holds interrupted items —
- *  it used to count the whole list, so the File tab could show a banner about
- *  YouTube downloads it wasn't displaying. */
+/** Offered only when something is actually interrupted — a download the app
+ *  was moving when it was last closed, which nothing but this banner would
+ *  otherwise invite you to pick back up. */
 export function ResumeBanner({
   count,
   t,

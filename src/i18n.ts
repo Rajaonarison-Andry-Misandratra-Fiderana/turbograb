@@ -27,19 +27,16 @@ const fr = {
 
   // ---- composer ----
   urlLabel: "Lien",
-  urlPlaceholder: "Colle un lien YouTube ou un fichier…",
-  sourceKind: "Type de téléchargement",
-  directFile: "Fichier direct",
-  detected: "détecté",
+  urlPlaceholder: "Colle un ou plusieurs liens…",
   paste: "Coller",
   clearField: "Effacer",
-  video: "Vidéo",
-  audio: "Audio",
   download: "Télécharger",
   destination: "Destination",
   chooseDir: "Choisir un dossier…",
   change: "Changer",
   dirWarn: "Choisis d'abord un dossier de destination.",
+  linkCount: (n: number) => `${n} liens détectés — Maj+Entrée pour aller à la ligne`,
+  noLink: "Aucun lien http(s) reconnu.",
 
   // ---- banner ----
   interruptedTitle: (n: number) =>
@@ -52,7 +49,8 @@ const fr = {
   clearFinished: "Effacer les terminés",
   search: "Filtrer…",
   emptyTitle: "Aucun téléchargement pour l'instant.",
-  emptyHint: "Colle un lien ci-dessus : YouTube ou fichier direct, on reconnaît tout seul.",
+  emptyHint:
+    "Colle un lien ci-dessus, ou installe l'extension navigateur pour que tes téléchargements arrivent ici tout seuls.",
   summary: (total: number, active: number) =>
     active > 0
       ? `${total} téléchargement${total > 1 ? "s" : ""} · ${active} en cours`
@@ -61,9 +59,6 @@ const fr = {
   clearSearch: "Effacer le filtre",
 
   // ---- card ----
-  best: "Meilleure",
-  quality: "Qualité",
-  unknownSize: "Taille inconnue",
   retry: "Réessayer",
   pause: "Pause",
   resume: "Reprendre",
@@ -79,11 +74,12 @@ const fr = {
   connections: (n: number) => `${n} connexion${n > 1 ? "s" : ""}`,
   singleStream: "1 connexion",
   waiting: "En attente…",
+  queuedHint: "En file — démarre dès qu'une place se libère.",
+  viaBrowser: "depuis le navigateur",
   fileGone: "Fichier introuvable sur le disque",
 
   // ---- summary ----
-  activeSummary: (n: number) =>
-    `${n} téléchargement${n > 1 ? "s" : ""} en cours`,
+  activeSummary: (n: number) => `${n} téléchargement${n > 1 ? "s" : ""} en cours`,
   nothingActive: "Aucun téléchargement actif",
 
   // ---- expired link ----
@@ -92,11 +88,55 @@ const fr = {
   relinkPlaceholder: "Colle le nouveau lien…",
   relinkBtn: "Reprendre",
 
+  // ---- settings: transfers ----
+  transfers: "Transferts",
+  connectionsSetting: "Connexions par téléchargement",
+  connectionsHint:
+    "Découpe le fichier et le récupère en parallèle. Mets 1 si un serveur bloque ou limite les requêtes multiples.",
+  maxActiveSetting: "Téléchargements simultanés",
+  maxActiveHint: "Les suivants attendent en file au lieu de se partager la ligne.",
+
+  // ---- settings: startup ----
+  startup: "Démarrage",
+  autostart: "Lancer au démarrage",
+  autostartHint: "TurboGrab s'ouvre avec la session, directement dans la zone de notification.",
+  startHidden: "Démarrer en arrière-plan",
+  startHiddenHint:
+    "Aucune fenêtre au lancement : l'icône de la zone de notification l'ouvre quand tu en as besoin.",
+
+  // ---- settings: browser ----
+  browserSection: "Extension navigateur",
+  serverEnabled: "Recevoir les téléchargements du navigateur",
+  serverEnabledHint:
+    "TurboGrab écoute sur 127.0.0.1 — la machine seulement, jamais le réseau.",
+  serverPort: "Port",
+  serverPortHint: "Doit correspondre au port réglé dans l'extension.",
+  paired: "Extension appairée",
+  pairedHint: "Le jeton ci-dessous autorise l'extension à envoyer des téléchargements.",
+  notPaired: "Aucune extension appairée",
+  notPairedHint:
+    "Clique sur « Connecter » dans l'extension : une demande d'autorisation s'affichera ici.",
+  copyToken: "Copier le jeton",
+  makeToken: "Générer un jeton à coller dans l'extension",
+  revoke: "Révoquer",
+  revokeBody:
+    "L'extension ne pourra plus envoyer de téléchargements tant qu'elle n'est pas réappairée.",
+  pairedToast: "Extension appairée",
+
+  // ---- pairing prompt ----
+  pairTitle: "Autoriser cette extension ?",
+  pairBody: (who: string) =>
+    `${who} demande à envoyer ses téléchargements à TurboGrab.`,
+  pairWarning:
+    "En autorisant, ce client pourra ajouter des téléchargements et lire leur avancement. Tu peux révoquer l'accès dans les paramètres.",
+  pairAllow: "Autoriser",
+  pairDeny: "Refuser",
+  unknownClient: "Un client local",
+
   // ---- dialogs ----
   cancelAction: "Annuler",
   confirmStopTitle: "Annuler ce téléchargement ?",
-  confirmStopBody:
-    "Le transfert en cours sera arrêté et l'élément retiré de la liste.",
+  confirmStopBody: "Le transfert en cours sera arrêté et l'élément retiré de la liste.",
   confirmStop: "Arrêter",
   confirmRemoveTitle: "Retirer de la liste ?",
   confirmRemoveBody: "Le fichier déjà téléchargé reste sur le disque.",
@@ -115,8 +155,7 @@ const fr = {
   toastDone: (title: string) => `Terminé : ${title}`,
 
   status: {
-    fetching: "Analyse…",
-    ready: "Prêt",
+    queued: "En file",
     downloading: "En cours",
     paused: "En pause",
     interrupted: "Interrompu",
@@ -124,14 +163,10 @@ const fr = {
     error: "Erreur",
   } as Record<string, string>,
 
-  // Fixed backend error codes (sent as "@code"); dynamic yt-dlp text passes through.
+  // Fixed backend error codes, envoyés sous la forme "@code".
   genericError: "Une erreur est survenue",
   errors: {
-    fetch_interrupted: "Analyse interrompue",
-    analyze_failed: "Impossible d'analyser cette URL",
-    unreadable: "Réponse illisible de yt-dlp",
     download_failed: "Le téléchargement a échoué",
-    no_ffmpeg: "ffmpeg introuvable — réinstalle l'application",
     link_expired: "Lien expiré",
     no_range: "Le serveur a refusé le téléchargement par segments",
     bad_link: "Lien invalide",
@@ -139,12 +174,12 @@ const fr = {
     short_read: "Le serveur a coupé l'envoi avant la fin",
     network: "Erreur réseau — vérifie ta connexion",
     server: "Le serveur a répondu par une erreur",
-    not_found: "Contenu introuvable ou supprimé",
-    blocked: "Accès refusé par le service (connexion, âge ou région)",
+    not_found: "Fichier introuvable ou supprimé",
+    blocked: "Accès refusé par le serveur",
     rate_limited: "Trop de requêtes — réessaie dans quelques minutes",
-    unsupported: "Lien non pris en charge",
     no_space: "Plus d'espace disque",
     no_write: "Écriture impossible dans ce dossier",
+    no_dir: "Choisis d'abord un dossier de destination",
     missing_file: "Fichier introuvable sur le disque",
   } as Record<string, string>,
 };
@@ -168,19 +203,16 @@ const en: Dict = {
   clearLog: "Clear",
 
   urlLabel: "Link",
-  urlPlaceholder: "Paste a YouTube or file link…",
-  sourceKind: "Download type",
-  directFile: "Direct file",
-  detected: "detected",
+  urlPlaceholder: "Paste one or more links…",
   paste: "Paste",
   clearField: "Clear",
-  video: "Video",
-  audio: "Audio",
   download: "Download",
   destination: "Destination",
   chooseDir: "Choose a folder…",
   change: "Change",
   dirWarn: "Choose a destination folder first.",
+  linkCount: (n) => `${n} links found — Shift+Enter for a new line`,
+  noLink: "No http(s) link recognised.",
 
   interruptedTitle: (n) => `${n} interrupted download${n > 1 ? "s" : ""}`,
   resumePrompt: "Resume where it left off?",
@@ -190,7 +222,8 @@ const en: Dict = {
   clearFinished: "Clear finished",
   search: "Filter…",
   emptyTitle: "No downloads yet.",
-  emptyHint: "Paste a link above — YouTube or a direct file, we work out which.",
+  emptyHint:
+    "Paste a link above, or install the browser extension and your downloads land here on their own.",
   summary: (total, active) =>
     active > 0
       ? `${total} download${total > 1 ? "s" : ""} · ${active} in progress`
@@ -198,9 +231,6 @@ const en: Dict = {
   noMatch: "Nothing matches this filter.",
   clearSearch: "Clear filter",
 
-  best: "Best",
-  quality: "Quality",
-  unknownSize: "Unknown size",
   retry: "Retry",
   pause: "Pause",
   resume: "Resume",
@@ -216,6 +246,8 @@ const en: Dict = {
   connections: (n) => `${n} connection${n > 1 ? "s" : ""}`,
   singleStream: "1 connection",
   waiting: "Waiting…",
+  queuedHint: "Queued — starts as soon as a slot frees up.",
+  viaBrowser: "from the browser",
   fileGone: "File not found on disk",
 
   activeSummary: (n) => `${n} download${n > 1 ? "s" : ""} in progress`,
@@ -226,10 +258,45 @@ const en: Dict = {
   relinkPlaceholder: "Paste the new link…",
   relinkBtn: "Resume",
 
+  transfers: "Transfers",
+  connectionsSetting: "Connections per download",
+  connectionsHint:
+    "Splits the file and fetches it in parallel. Set it to 1 for a server that throttles or blocks multiple requests.",
+  maxActiveSetting: "Simultaneous downloads",
+  maxActiveHint: "The rest wait in the queue instead of sharing the line.",
+
+  startup: "Startup",
+  autostart: "Launch on boot",
+  autostartHint: "TurboGrab starts with your session, straight to the tray.",
+  startHidden: "Start in the background",
+  startHiddenHint: "No window on launch — the tray icon opens it when you need it.",
+
+  browserSection: "Browser extension",
+  serverEnabled: "Accept downloads from the browser",
+  serverEnabledHint: "TurboGrab listens on 127.0.0.1 — this machine only, never the network.",
+  serverPort: "Port",
+  serverPortHint: "Must match the port set in the extension.",
+  paired: "Extension paired",
+  pairedHint: "The token below is what lets the extension send downloads over.",
+  notPaired: "No extension paired",
+  notPairedHint: "Click “Connect” in the extension: a permission prompt will appear here.",
+  copyToken: "Copy token",
+  makeToken: "Generate a token to paste into the extension",
+  revoke: "Revoke",
+  revokeBody: "The extension won't be able to send downloads until it pairs again.",
+  pairedToast: "Extension paired",
+
+  pairTitle: "Allow this extension?",
+  pairBody: (who) => `${who} wants to send its downloads to TurboGrab.`,
+  pairWarning:
+    "Allowing this lets the client add downloads and read their progress. You can revoke it in settings.",
+  pairAllow: "Allow",
+  pairDeny: "Deny",
+  unknownClient: "A local client",
+
   cancelAction: "Cancel",
   confirmStopTitle: "Cancel this download?",
-  confirmStopBody:
-    "The transfer in progress will stop and the item will leave the list.",
+  confirmStopBody: "The transfer in progress will stop and the item will leave the list.",
   confirmStop: "Stop",
   confirmRemoveTitle: "Remove from the list?",
   confirmRemoveBody: "The downloaded file stays on disk.",
@@ -245,8 +312,7 @@ const en: Dict = {
   toastDone: (title) => `Done: ${title}`,
 
   status: {
-    fetching: "Analyzing…",
-    ready: "Ready",
+    queued: "Queued",
     downloading: "Downloading",
     paused: "Paused",
     interrupted: "Interrupted",
@@ -256,11 +322,7 @@ const en: Dict = {
 
   genericError: "Something went wrong",
   errors: {
-    fetch_interrupted: "Analysis interrupted",
-    analyze_failed: "Couldn't analyze this URL",
-    unreadable: "Unreadable yt-dlp response",
     download_failed: "Download failed",
-    no_ffmpeg: "ffmpeg not found — reinstall the app",
     link_expired: "Link expired",
     no_range: "Server refused the segmented download",
     bad_link: "Invalid link",
@@ -268,12 +330,12 @@ const en: Dict = {
     short_read: "The server cut the transfer short",
     network: "Network error — check your connection",
     server: "The server answered with an error",
-    not_found: "Content not found or removed",
-    blocked: "The service refused access (sign-in, age or region)",
+    not_found: "File not found or removed",
+    blocked: "The server refused access",
     rate_limited: "Too many requests — try again in a few minutes",
-    unsupported: "Unsupported link",
     no_space: "No disk space left",
     no_write: "Can't write to this folder",
+    no_dir: "Choose a destination folder first",
     missing_file: "File not found on disk",
   },
 };

@@ -1,37 +1,25 @@
 /** Mirrors `DownloadInfo` in src-tauri/src/lib.rs. Keep the two in step. */
 
 export type Status =
-  | "fetching"
-  | "ready"
+  /** Added, waiting for a free slot — see `max_active` in settings. */
+  | "queued"
   | "downloading"
   | "paused"
   | "interrupted"
   | "done"
   | "error";
 
-export type Kind = "video" | "audio" | "file";
-
-export type Tab = "youtube" | "file";
-
-export interface Quality {
-  label: string;
-  value: string;
-  /** Estimated bytes; 0 = unknown. Formatted in the UI, per locale. */
-  size_bytes: number;
-}
+/** Where the item came from: pasted into the app, or handed over by the
+ *  browser extension. Shown on the card so a download that appeared on its own
+ *  is explained rather than mysterious. */
+export type Source = "app" | "browser";
 
 export interface DownloadInfo {
   id: string;
   url: string;
-  kind: Kind;
   out_dir: string;
   title: string;
-  thumbnail: string;
-  qualities: Quality[];
-  quality: string;
   percent: number;
-  speed: string;
-  eta: string;
   /** Always an "@code" — the backend never sends raw failure text. */
   error_msg: string;
   /** The raw diagnostic behind it. Never rendered; copyable on demand. */
@@ -57,12 +45,30 @@ export interface DownloadInfo {
   /** Unix seconds; 0 = unknown. */
   started_at: number;
   finished_at: number;
-  duration: number;
-  uploader: string;
+  /** Request headers replayed on every connection — cookies, referer, the
+   *  browser's user-agent. Empty for a link pasted into the app. */
+  headers: Record<string, string>;
+  source: Source;
 }
 
-/** Backend flags a 401/403/410 on a direct link as `@link_expired`: the bytes
- *  on disk are still good, only the address went stale. */
+/** Mirrors `Settings` in src-tauri/src/lib.rs. */
+export interface Settings {
+  out_dir: string;
+  lang: string;
+  theme: string;
+  tray_hint_shown: boolean;
+  connections: number;
+  max_active: number;
+  autostart: boolean;
+  start_hidden: boolean;
+  server_enabled: boolean;
+  server_port: number;
+  /** Read-only here: only pairing mints it. */
+  token: string;
+}
+
+/** Backend flags a 401/403/410 on a link as `@link_expired`: the bytes on disk
+ *  are still good, only the address went stale. */
 export const isExpired = (d: DownloadInfo) =>
   d.status === "error" && d.error_msg === "@link_expired";
 
@@ -70,8 +76,22 @@ export const isFinished = (d: DownloadInfo) =>
   d.status === "done" || d.status === "error";
 
 export const isRunning = (d: DownloadInfo) =>
-  d.status === "downloading" || d.status === "fetching";
+  d.status === "downloading" || d.status === "queued";
 
 /** Newest first, and stable: sorting by status made cards jump mid-download. */
 export const byNewest = (a: DownloadInfo, b: DownloadInfo) =>
   b.created_at - a.created_at || a.id.localeCompare(b.id);
+
+/** Split whatever was pasted into links.
+ *
+ *  A copied block of links is one paste, not one download: newlines, spaces and
+ *  tabs all separate. Anything that isn't an http(s) URL is dropped rather than
+ *  queued as a card that can only fail. */
+export function parseLinks(text: string): string[] {
+  const seen = new Set<string>();
+  return text
+    .split(/[\s\r\n]+/)
+    .map((s) => s.trim().replace(/[),.;]+$/, ""))
+    .filter((s) => /^https?:\/\/\S+$/i.test(s))
+    .filter((s) => (seen.has(s) ? false : (seen.add(s), true)));
+}

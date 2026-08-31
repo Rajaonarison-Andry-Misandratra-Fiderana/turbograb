@@ -2,14 +2,12 @@
 #
 # Install TurboGrab as a native Linux app under ~/.local (no root, no dpkg).
 #
-#   ~/.local/lib/turbograb/     ytfetcher + the three sidecars
+#   ~/.local/lib/turbograb/     the binary
 #   ~/.local/bin/turbograb      wrapper on PATH -> `turbograb` from any shell
 #   ~/.local/share/...          .desktop entry + hicolor icons -> app launcher
 #
-# The sidecars MUST sit next to the binary: lib.rs resolves `.sidecar("yt-dlp")`
-# verbatim against <exe_dir>. Hence the private lib dir rather than dropping four
-# executables straight into ~/.local/bin, where `ffmpeg`/`ffprobe`/`yt-dlp` would
-# shadow (or be shadowed by) whatever the user already has on PATH.
+# The binary lives in a private lib dir rather than straight in ~/.local/bin so
+# the wrapper above it owns the environment the app starts in.
 #
 # Usage: ./scripts/install.sh [--build]
 #   --build   run `npm run tauri build -- --no-bundle` first
@@ -19,8 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_ID="turbograb"
 APP_NAME="TurboGrab"
-BIN_NAME="ytfetcher"        # cargo package name; also the X11 WM class
-TRIPLE="x86_64-unknown-linux-gnu"
+BIN_NAME="turbograb"        # cargo package name; also the X11 WM class
 
 LIBDIR="$HOME/.local/lib/$APP_ID"
 BINDIR="$HOME/.local/bin"
@@ -41,21 +38,9 @@ if [ ! -x "$SRC_BIN" ]; then
     exit 1
 fi
 
-echo "==> Installing binaries to $LIBDIR"
+echo "==> Installing the binary to $LIBDIR"
 mkdir -p "$LIBDIR"
 install -m 755 "$SRC_BIN" "$LIBDIR/$BIN_NAME"
-
-# Sidecars come from src-tauri/binaries/, where they carry the target-triple
-# suffix. Tauri strips that suffix when bundling; we do the same by hand so this
-# works whether or not the last build ran the bundler.
-for tool in yt-dlp ffmpeg ffprobe; do
-    src="$ROOT/src-tauri/binaries/$tool-$TRIPLE"
-    if [ ! -f "$src" ]; then
-        echo "error: missing sidecar $src" >&2
-        exit 1
-    fi
-    install -m 755 "$src" "$LIBDIR/$tool"
-done
 
 echo "==> Installing launcher to $BINDIR/$APP_ID"
 mkdir -p "$BINDIR"
@@ -99,13 +84,13 @@ cat > "$DESKTOP_DIR/$APP_ID.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=$APP_NAME
-Comment=Download YouTube video and audio, or any direct file link
-Comment[fr]=Télécharge des vidéos et de l'audio YouTube, ou tout lien de fichier direct
+Comment=Multi-connection download manager
+Comment[fr]=Gestionnaire de téléchargements multi-connexions
 Exec=$BINDIR/$APP_ID %u
 Icon=$APP_ID
 Terminal=false
-Categories=AudioVideo;Video;
-Keywords=youtube;download;downloader;video;audio;file;telecharger;
+Categories=Network;FileTransfer;
+Keywords=download;downloader;manager;file;telecharger;telechargement;
 StartupWMClass=$BIN_NAME
 EOF
 chmod 644 "$DESKTOP_DIR/$APP_ID.desktop"

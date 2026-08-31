@@ -1,7 +1,7 @@
 [package]
-name = "ytfetcher"
+name = "turbograb"
 version = "0.1.0"
-description = "A Tauri App"
+description = "TurboGrab — a multi-connection download manager"
 authors = ["you"]
 edition = "2021"
 
@@ -11,7 +11,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "ytfetcher_lib"
+name = "turbograb_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -20,18 +20,26 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
-tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
+# "Launch on boot" writes the platform's own autostart entry (XDG .desktop,
+# LaunchAgent, registry Run key) rather than a hand-rolled Linux-only file.
+tauri-plugin-autostart = "2"
+# The local API listens on a fixed port: a second instance must hand its
+# arguments to the first and exit, not fail to bind and die half-started.
+tauri-plugin-single-instance = "2"
+# Pairing tokens for the browser extension. OS entropy, not a time-seeded hash.
+getrandom = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Direct-file downloads (the "Fichier" tab). rustls avoids a system OpenSSL dep;
-# `stream` gives us `bytes_stream()` for progress. No gzip/brotli on purpose —
-# we want raw bytes so Content-Length matches what we write.
+# rustls avoids a system OpenSSL dep; `stream` gives us `bytes_stream()` for
+# progress. No gzip/brotli on purpose — we want raw bytes so Content-Length
+# matches what we write.
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 futures-util = "0.3"
 # Async file I/O so segment writes don't block the shared async-runtime threads.
-# `time` powers the retry backoff between failed segment attempts.
-tokio = { version = "1", features = ["fs", "io-util", "time"] }
+# `time` powers the retry backoff between failed segment attempts; `net`,
+# `sync` and `macros` the loopback API the browser extension talks to.
+tokio = { version = "1", features = ["fs", "io-util", "time", "net", "sync", "macros"] }
 
 [dev-dependencies]
 # Test-only runtime so `probe()` can be driven against a throwaway HTTP server.

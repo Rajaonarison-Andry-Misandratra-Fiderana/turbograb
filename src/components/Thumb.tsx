@@ -1,34 +1,49 @@
-import { useState } from "react";
 import Box from "@mui/material/Box";
-import Skeleton from "@mui/material/Skeleton";
+import Typography from "@mui/material/Typography";
+import ArchiveOutlined from "@mui/icons-material/ArchiveOutlined";
 import AudiotrackOutlined from "@mui/icons-material/AudiotrackOutlined";
+import DescriptionOutlined from "@mui/icons-material/DescriptionOutlined";
+import ImageOutlined from "@mui/icons-material/ImageOutlined";
 import InsertDriveFileOutlined from "@mui/icons-material/InsertDriveFileOutlined";
 import MovieOutlined from "@mui/icons-material/MovieOutlined";
+import PictureAsPdfOutlined from "@mui/icons-material/PictureAsPdfOutlined";
+import TerminalOutlined from "@mui/icons-material/TerminalOutlined";
 import type { DownloadInfo } from "../types";
 import { shape, tok } from "../theme";
 
-/** Fixed 16:9 box, always the same size.
+/** File extension, lowercase and without the dot. */
+export function extOf(d: DownloadInfo): string {
+  const name = d.title || d.url.split(/[?#]/)[0];
+  const dot = name.lastIndexOf(".");
+  // A dot in the last 8 characters is an extension; a dot in a hostname is not.
+  return dot > 0 && name.length - dot <= 9 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+const FAMILIES: [RegExp, typeof MovieOutlined][] = [
+  [/^(mp4|mkv|avi|mov|webm|m4v|flv|wmv|mpg|mpeg|ts)$/, MovieOutlined],
+  [/^(mp3|flac|wav|ogg|opus|m4a|aac|wma|aiff)$/, AudiotrackOutlined],
+  [/^(png|jpe?g|gif|webp|svg|bmp|tiff?|avif|heic)$/, ImageOutlined],
+  [/^(zip|rar|7z|tar|gz|bz2|xz|zst|iso|img|deb|rpm|pkg|dmg|apk)$/, ArchiveOutlined],
+  [/^pdf$/, PictureAsPdfOutlined],
+  [/^(doc|docx|odt|xls|xlsx|ods|ppt|pptx|odp|txt|md|csv|epub)$/, DescriptionOutlined],
+  [/^(exe|msi|appimage|sh|bat|bin|run|jar|deb)$/, TerminalOutlined],
+];
+
+/** Fixed 16:9 box, always the same size, whatever the file.
  *
- *  The old thumb was 48x48 with no image and 80x48 with one, so every card
- *  jumped sideways the moment a thumbnail arrived. Here the box is reserved up
- *  front and a skeleton fills it until the image decodes. */
+ *  There is no thumbnail to fetch for a direct download, so the box carries the
+ *  two things that *are* known before a single byte lands: what kind of file it
+ *  is, and its extension. The size is reserved up front either way — a card
+ *  that resizes as it learns about itself is a card that jumps under the mouse. */
 export function Thumb({ d }: { d: DownloadInfo }) {
-  const [loaded, setLoaded] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const showImage = !!d.thumbnail && !failed;
-  const Fallback =
-    d.kind === "audio"
-      ? AudiotrackOutlined
-      : d.kind === "file"
-        ? InsertDriveFileOutlined
-        : MovieOutlined;
+  const ext = extOf(d);
+  const Icon = FAMILIES.find(([re]) => re.test(ext))?.[1] ?? InsertDriveFileOutlined;
 
   return (
     <Box
       sx={{
         position: "relative",
         flexShrink: 0,
-        // 16:9, big enough that a video is actually recognisable from it.
         width: 128,
         height: 72,
         borderRadius: `${shape.sm}px`,
@@ -37,37 +52,19 @@ export function Thumb({ d }: { d: DownloadInfo }) {
         border: `1px solid ${tok.outlineVariant}`,
         display: "grid",
         placeItems: "center",
+        gap: 0.25,
         color: "text.secondary",
+        "& svg": { fontSize: 26 },
       }}
     >
-      {showImage ? (
-        <>
-          {!loaded && (
-            <Skeleton
-              variant="rectangular"
-              sx={{ position: "absolute", inset: 0 }}
-              animation="wave"
-            />
-          )}
-          <Box
-            component="img"
-            src={d.thumbnail}
-            alt=""
-            loading="lazy"
-            onLoad={() => setLoaded(true)}
-            onError={() => setFailed(true)}
-            sx={{
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-              display: "block",
-              opacity: loaded ? 1 : 0,
-              transition: "opacity 200ms",
-            }}
-          />
-        </>
-      ) : (
-        <Fallback />
+      <Icon />
+      {!!ext && (
+        <Typography
+          variant="caption"
+          sx={{ fontSize: 10, letterSpacing: 0.6, textTransform: "uppercase", lineHeight: 1 }}
+        >
+          {ext.slice(0, 6)}
+        </Typography>
       )}
     </Box>
   );

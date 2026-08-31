@@ -12,16 +12,6 @@
     "core:window:allow-show",
     "core:window:allow-close",
     "opener:default",
-    "dialog:default",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "yt-dlp",
-          "sidecar": true,
-          "args": true
-        }
-      ]
-    }
+    "dialog:default"
   ]
 }

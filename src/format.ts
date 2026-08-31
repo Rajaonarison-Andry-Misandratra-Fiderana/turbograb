@@ -5,7 +5,7 @@ import type { Lang } from "./i18n";
 
 const LOCALE: Record<Lang, string> = { fr: "fr-FR", en: "en-US" };
 
-// Decimal (SI) units, matching what yt-dlp and download sites quote.
+// Decimal (SI) units, matching what servers and download sites quote.
 const UNITS: Record<Lang, string[]> = {
   fr: ["o", "ko", "Mo", "Go", "To"],
   en: ["B", "KB", "MB", "GB", "TB"],
@@ -38,7 +38,7 @@ export function progressBytes(done: number, total: number, lang: Lang): string {
   return t || d;
 }
 
-/** Media length: "4:12", "1:02:33". Empty when unknown. */
+/** A duration in seconds: "4:12", "1:02:33". Empty when unknown. */
 export function duration(secs: number): string {
   if (!secs || secs <= 0) return "";
   const s = Math.round(secs);
@@ -92,7 +92,7 @@ export function eta(secs: number): string {
   return secs < 0 ? "" : duration(Math.max(secs, 1));
 }
 
-/** Host of a direct link, for the second line of a file card. */
+/** Host of a link, for the second line of a card. */
 export function host(url: string): string {
   try {
     return new URL(url).host;

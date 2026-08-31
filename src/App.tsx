@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import Box from "@mui/material/Box";
@@ -24,6 +25,7 @@ import { ConfirmDialog, type ConfirmSpec } from "./components/ConfirmDialog";
 import { DownloadCard, type CardActions } from "./components/DownloadCard";
 import { EmptyState } from "./components/EmptyState";
 import { LogDialog } from "./components/LogDialog";
+import { PairDialog, type PairRequest } from "./components/PairDialog";
 import { ResizeHandles } from "./components/ResizeHandles";
 import { ResumeBanner } from "./components/ResumeBanner";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -31,18 +33,10 @@ import { TitleBar } from "./components/TitleBar";
 import { errorText } from "./errors";
 import { useDownloads } from "./hooks/useDownloads";
 import { DICT, type Lang } from "./i18n";
-import type { Source } from "./source";
-import { isFinished, type DownloadInfo } from "./types";
+import { isFinished, type DownloadInfo, type Settings } from "./types";
 
 /** Page gutter, in theme spacing units (8px each). */
 const GUTTER = 2.5;
-
-interface Settings {
-  out_dir: string;
-  lang: string;
-  theme: string;
-  tray_hint_shown: boolean;
-}
 
 export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -56,6 +50,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
+  const [pair, setPair] = useState<PairRequest | null>(null);
   const [toast, setToast] = useState("");
   const [present, setPresent] = useState<Record<string, boolean>>({});
 
@@ -72,11 +67,41 @@ export default function App() {
   // painted. A borderless window has no native background to fall back on, so
   // showing it earlier means a flash of the wrong colour in one scheme or the
   // other; waiting for the first frame is right for both.
+  //
+  // Except when this launch was meant to stay in the tray — at boot, or by
+  // choice. The webview still runs, so downloads and the browser listener are
+  // live; there is simply no window until the tray is clicked.
   useEffect(() => {
-    const raf = requestAnimationFrame(() => {
-      getCurrentWindow().show().catch(() => {});
+    let cancelled = false;
+    invoke<boolean>("launched_hidden")
+      .catch(() => false)
+      .then((hidden) => {
+        if (cancelled || hidden) return;
+        requestAnimationFrame(() => {
+          getCurrentWindow().show().catch(() => {});
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // A pairing request parks an HTTP connection until this dialog is answered,
+  // so it is rendered wherever the app is — no route, no tab to be on.
+  useEffect(() => {
+    const unReq = listen<PairRequest>("pair-request", (e) => setPair(e.payload));
+    const unClosed = listen<string>("pair-closed", (e) =>
+      setPair((cur) => (cur && cur.id === e.payload ? null : cur)),
+    );
+    const unPaired = listen<string>("paired", (e) => {
+      setSettings((cur) => (cur ? { ...cur, token: e.payload } : cur));
+      setToast(e.payload ? DICT[langRef.current].pairedToast : "");
     });
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      unReq.then((f) => f());
+      unClosed.then((f) => f());
+      unPaired.then((f) => f());
+    };
   }, []);
 
   const patchSettings = useCallback((next: Partial<Settings>) => {
@@ -87,6 +112,11 @@ export default function App() {
       return merged;
     });
   }, []);
+
+  // Read by listeners that are registered exactly once, so they can phrase a
+  // toast in the current language without re-subscribing on every change.
+  const langRef = useRef<Lang>(lang);
+  langRef.current = lang;
 
   useEffect(() => {
     document.documentElement.lang = lang;
@@ -155,26 +185,17 @@ export default function App() {
   // action reads the same wherever it surfaces.
   const fail = (e: unknown) => setToast(errorText(String(e), t));
 
-  const submit = async (url: string, source: Source) => {
+  const submit = async (urls: string[]) => {
     if (!outDir) return setDirWarn(true);
-    const id = crypto.randomUUID();
     try {
-      if (source === "file") {
-        await invoke("start_file_download", { id, url, outDir });
-      } else {
-        await invoke("fetch_info", { id, url, kind: source });
-      }
+      await invoke("add_downloads", { urls, outDir });
     } catch (e) {
       // Surface it on a card instead of leaving the user with nothing.
-      failLocally({ id, url, kind: source }, e);
+      failLocally({ id: crypto.randomUUID(), url: urls[0] }, e);
     }
   };
 
   const actions: CardActions = {
-    start: (d, quality) => {
-      if (!outDir) return setDirWarn(true);
-      invoke("start_download", { id: d.id, quality, outDir }).catch(fail);
-    },
     pause: (d) => {
       const run = () => invoke("pause_download", { id: d.id }).catch(fail);
       // A server that ignores Range makes "pause" mean "throw away the bytes".
@@ -190,8 +211,7 @@ export default function App() {
       } else run();
     },
     resume: (d) => invoke("resume_download", { id: d.id }).catch(fail),
-    retry: (d) =>
-      invoke(d.kind === "file" ? "resume_download" : "retry_fetch", { id: d.id }).catch(fail),
+    retry: (d) => invoke("resume_download", { id: d.id }).catch(fail),
     relink: (d, url) => invoke("refresh_link", { id: d.id, url }).catch(fail),
     openFile: (d) => invoke("open_file", { id: d.id }).catch(fail),
     revealFile: (d) => invoke("reveal_file", { id: d.id }).catch(fail),
@@ -202,7 +222,7 @@ export default function App() {
       );
     },
     remove: (d) => {
-      const running = !isFinished(d) && d.status !== "ready";
+      const running = !isFinished(d);
       setConfirm({
         title: running ? t.confirmStopTitle : t.confirmRemoveTitle,
         body: running ? t.confirmStopBody : t.confirmRemoveBody,
@@ -384,16 +404,37 @@ export default function App() {
         </Box>
       </Box>
 
-      <SettingsDialog
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        t={t}
-        lang={lang}
-        setLang={(l) => patchSettings({ lang: l })}
-        outDir={outDir}
-        onPickDir={pickDir}
-        onOpenLogs={() => setLogsOpen(true)}
-      />
+      {settings && (
+        <SettingsDialog
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          t={t}
+          lang={lang}
+          settings={settings}
+          patch={patchSettings}
+          onPickDir={pickDir}
+          onOpenLogs={() => setLogsOpen(true)}
+          onCopy={actions.copy}
+          onMakeToken={() =>
+            invoke<string>("ensure_token")
+              .then((token) => setSettings((cur) => (cur ? { ...cur, token } : cur)))
+              .catch(fail)
+          }
+          onRevokeToken={() =>
+            setConfirm({
+              title: t.revoke,
+              body: t.revokeBody,
+              confirmLabel: t.revoke,
+              cancelLabel: t.cancelAction,
+              destructive: true,
+              onConfirm: () => {
+                invoke("revoke_token").catch(fail);
+                setSettings((cur) => (cur ? { ...cur, token: "" } : cur));
+              },
+            })
+          }
+        />
+      )}
       <LogDialog
         open={logsOpen}
         onClose={() => setLogsOpen(false)}
@@ -402,6 +443,14 @@ export default function App() {
         onCopy={actions.copy}
       />
       <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />
+      <PairDialog
+        req={pair}
+        t={t}
+        onRespond={(id, allow) => {
+          setPair(null);
+          invoke("pair_respond", { id, allow }).catch(fail);
+        }}
+      />
       <Snackbar
         open={!!toast}
         message={toast}

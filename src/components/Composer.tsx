@@ -1,14 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
-import Divider from "@mui/material/Divider";
 import FormHelperText from "@mui/material/FormHelperText";
 import IconButton from "@mui/material/IconButton";
 import InputAdornment from "@mui/material/InputAdornment";
-import ListItemIcon from "@mui/material/ListItemIcon";
-import ListItemText from "@mui/material/ListItemText";
-import Menu from "@mui/material/Menu";
-import MenuItem from "@mui/material/MenuItem";
 import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import TextField from "@mui/material/TextField";
@@ -19,19 +14,24 @@ import ContentPasteOutlined from "@mui/icons-material/ContentPasteOutlined";
 import DownloadOutlined from "@mui/icons-material/DownloadOutlined";
 import FolderOpenOutlined from "@mui/icons-material/FolderOpenOutlined";
 import FolderOutlined from "@mui/icons-material/FolderOutlined";
-import GraphicEqOutlined from "@mui/icons-material/GraphicEqOutlined";
-import InsertDriveFileOutlined from "@mui/icons-material/InsertDriveFileOutlined";
-import MovieOutlined from "@mui/icons-material/MovieOutlined";
+import LinkOutlined from "@mui/icons-material/LinkOutlined";
 import { shape, tok } from "../theme";
 import type { Dict } from "../i18n";
-import { defaultSource, detect, type Source } from "../source";
+import { parseLinks } from "../types";
 
-const ICON: Record<Source, typeof MovieOutlined> = {
-  video: MovieOutlined,
-  audio: GraphicEqOutlined,
-  file: InsertDriveFileOutlined,
-};
+/** The outlined input's own horizontal padding. Every control in the composer
+ *  reuses it, so leading icons and text sit in one column down the left edge
+ *  and the trailing icons in one down the right. */
+const EDGE = 14;
+/** Height of a medium outlined TextField — the download button matches it. */
+const FIELD_H = 56;
 
+/** One field, any number of links.
+ *
+ *  A block of links copied out of a page is one paste and one click: the field
+ *  splits on whitespace, so ten URLs become ten cards. The count under the
+ *  field is the confirmation — it says how many links were actually recognised
+ *  before anything is queued. */
 export function Composer({
   t,
   outDir,
@@ -43,43 +43,29 @@ export function Composer({
   outDir: string;
   dirWarn: boolean;
   onPickDir: () => void;
-  onSubmit: (url: string, source: Source) => void;
+  onSubmit: (urls: string[]) => void;
 }) {
-  const [url, setUrl] = useState("");
-  const [override, setOverride] = useState<Source | null>(null);
-  const [menu, setMenu] = useState<HTMLElement | null>(null);
-
-  const kind = useMemo(() => detect(url), [url]);
-  // The link decides; the picker only exists to correct a wrong guess, and the
-  // correction is dropped as soon as the link it applied to changes.
-  const source: Source = override ?? defaultSource(url);
-  useEffect(() => setOverride(null), [kind]);
+  const [text, setText] = useState("");
+  const links = useMemo(() => parseLinks(text), [text]);
+  const multiline = text.includes("\n");
+  const hint = links.length > 1 ? t.linkCount(links.length) : text.trim() && !links.length ? t.noLink : "";
 
   const submit = () => {
-    if (!url.trim()) return;
-    onSubmit(url.trim(), source);
-    setUrl("");
-    setOverride(null);
+    if (!links.length) return;
+    onSubmit(links);
+    setText("");
   };
 
   // Clipboard reads can be refused (no permission, no secure context); a paste
   // button that silently does nothing beats one that throws.
   const paste = async () => {
     try {
-      const text = await navigator.clipboard.readText();
-      if (text.trim()) setUrl(text.trim());
+      const clip = await navigator.clipboard.readText();
+      if (clip.trim()) setText((cur) => (cur.trim() ? `${cur.trim()}\n${clip.trim()}` : clip.trim()));
     } catch {
       /* ignore — the keyboard still pastes */
     }
   };
-
-  const SourceIcon = ICON[source];
-  const OPTIONS: { id: Source; label: string; Icon: typeof MovieOutlined }[] = [
-    { id: "video", label: t.video, Icon: MovieOutlined },
-    { id: "audio", label: t.audio, Icon: GraphicEqOutlined },
-    { id: "file", label: t.directFile, Icon: InsertDriveFileOutlined },
-  ];
-  const auto = defaultSource(url);
 
   return (
     <Paper
@@ -90,43 +76,37 @@ export function Composer({
       }}
     >
       <Stack spacing={2}>
-        <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
+        <Stack direction="row" spacing={1.5} sx={{ alignItems: "flex-start" }}>
           <TextField
-            fullWidth
+            sx={{ flex: 1, minWidth: 0 }}
+            multiline={multiline}
+            maxRows={6}
             label={t.urlLabel}
             placeholder={t.urlPlaceholder}
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter sends; Shift+Enter is how you get a second link in.
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
             slotProps={{
               input: {
-                // The kind switch lives inside the field, in a slot that is
-                // always occupied: nothing appears or disappears, so the layout
-                // never gains an empty row or shifts.
                 startAdornment: (
                   <InputAdornment position="start">
-                    <Tooltip title={t.sourceKind}>
-                      <IconButton
-                        size="small"
-                        aria-label={t.sourceKind}
-                        aria-haspopup="menu"
-                        onClick={(e) => setMenu(e.currentTarget)}
-                        color={source === "file" ? "default" : "primary"}
-                      >
-                        <SourceIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                    <Divider orientation="vertical" flexItem sx={{ ml: 0.5, my: 0.5 }} />
+                    <LinkOutlined fontSize="small" sx={{ color: tok.primary }} />
                   </InputAdornment>
                 ),
                 endAdornment: (
                   <InputAdornment position="end">
-                    {url ? (
+                    {text ? (
                       <Tooltip title={t.clearField}>
                         <IconButton
                           size="small"
                           aria-label={t.clearField}
-                          onClick={() => setUrl("")}
+                          onClick={() => setText("")}
                         >
                           <ClearOutlined fontSize="small" />
                         </IconButton>
@@ -146,41 +126,24 @@ export function Composer({
           <Button
             variant="contained"
             startIcon={<DownloadOutlined />}
-            disabled={!url.trim()}
+            disabled={!links.length}
             onClick={submit}
-            sx={{ flexShrink: 0 }}
+            sx={{ flexShrink: 0, height: FIELD_H }}
           >
             {t.download}
           </Button>
         </Stack>
 
-        <Menu anchorEl={menu} open={!!menu} onClose={() => setMenu(null)}>
-          {OPTIONS.map((o) => (
-            <MenuItem
-              key={o.id}
-              selected={o.id === source}
-              onClick={() => {
-                setOverride(o.id);
-                setMenu(null);
-              }}
-            >
-              <ListItemIcon>
-                <o.Icon fontSize="small" />
-              </ListItemIcon>
-              <ListItemText>{o.label}</ListItemText>
-              {o.id === auto && (
-                <Typography variant="caption" color="text.secondary" sx={{ ml: 2 }}>
-                  {t.detected}
-                </Typography>
-              )}
-            </MenuItem>
-          ))}
-        </Menu>
+        {hint && (
+          // Under the row, not inside it: a helper that only exists when it has
+          // something to say keeps every gap in the composer the same 16px.
+          <FormHelperText sx={{ mt: "-8px !important", mx: `${EDGE}px` }}>{hint}</FormHelperText>
+        )}
 
         <Box>
           {/* One control: it shows where files land, and clicking it changes
               that. The trailing icon is the affordance — it replaces the word
-              "Changer", which said the same thing in more room. */}
+              "Change", which said the same thing in more room. */}
           <Tooltip title={t.change}>
             <Button
               onClick={onPickDir}
@@ -190,6 +153,7 @@ export function Composer({
               sx={{
                 width: "100%",
                 justifyContent: "flex-start",
+                px: `${EDGE}px`,
                 borderRadius: `${shape.sm}px`,
                 border: `1px ${dirWarn ? "solid" : "dashed"} ${
                   dirWarn ? tok.error : tok.outlineVariant
@@ -217,11 +181,15 @@ export function Composer({
               </Typography>
               <FolderOpenOutlined
                 fontSize="small"
-                sx={{ ml: 1.5, flexShrink: 0, color: tok.primary }}
+                sx={{ ml: 1.5, mr: "7px", flexShrink: 0, color: tok.primary }}
               />
             </Button>
           </Tooltip>
-          {dirWarn && <FormHelperText error>{t.dirWarn}</FormHelperText>}
+          {dirWarn && (
+            <FormHelperText error sx={{ mx: `${EDGE}px` }}>
+              {t.dirWarn}
+            </FormHelperText>
+          )}
         </Box>
       </Stack>
     </Paper>
