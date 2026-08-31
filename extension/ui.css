@@ -1,0 +1,82 @@
+/* Shared by the options page and the popup. Small enough to stay one file, and
+   deliberately plain: an extension page that mimics browser chrome ages badly,
+   so this leans on system colours and gets out of the way. */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #10161c;
+  --muted: #5b6771;
+  --line: #dde3e8;
+  --card: #f7f9fa;
+  --accent: #0b7285;
+  --ok: #0f7b4f;
+  --bad: #b42318;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #10161c;
+    --fg: #e6edf3;
+    --muted: #9aa7b2;
+    --line: #253039;
+    --card: #161f27;
+    --accent: #3bc9db;
+    --ok: #4ade80;
+    --bad: #ff7b72;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.page { padding: 20px; max-width: 640px; margin: 0 auto; }
+.popup { padding: 14px; width: 320px; }
+
+.head { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.head h1 { font-size: 16px; margin: 0; }
+.sub, small { color: var(--muted); }
+small { display: block; font-size: 11.5px; margin-top: 2px; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 22px 0 8px; }
+
+.card { border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+.row {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 12px 14px; border-bottom: 1px solid var(--line);
+}
+.row:last-child { border-bottom: 0; }
+.row.col { flex-direction: column; align-items: stretch; }
+.row > span:first-child { min-width: 0; }
+.actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+input[type="text"], input[type="number"], textarea {
+  font: inherit; color: inherit; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+}
+input[type="number"] { width: 90px; }
+input[type="text"] { min-width: 200px; }
+textarea { width: 100%; box-sizing: border-box; margin-top: 6px; resize: vertical; }
+input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
+
+button {
+  font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--bg); color: inherit;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: 0.5; cursor: default; }
+
+.pill { margin-left: auto; font-size: 11.5px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
+.pill.ok { color: var(--ok); border-color: currentColor; }
+.pill.bad { color: var(--bad); border-color: currentColor; }
+.saved { color: var(--ok); font-size: 12px; }
+
+/* popup */
+.list { margin: 12px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; max-height: 260px; overflow-y: auto; }
+.item { display: grid; gap: 4px; }
+.item .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item .meta { color: var(--muted); font-size: 11.5px; display: flex; justify-content: space-between; gap: 8px; }
+.bar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+.empty { color: var(--muted); text-align: center; padding: 18px 0; }

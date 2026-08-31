@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TurboGrab</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body class="page">
+    <header class="head">
+      <img src="icons/icon-48.png" alt="" width="32" height="32" />
+      <div>
+        <h1>TurboGrab</h1>
+        <p class="sub">Send browser downloads to the app.</p>
+      </div>
+      <span id="status" class="pill">…</span>
+    </header>
+
+    <section class="card">
+      <label class="row">
+        <span>
+          <strong>Intercept downloads</strong>
+          <small>Off: the browser downloads normally, as if this extension weren't installed.</small>
+        </span>
+        <input type="checkbox" id="enabled" />
+      </label>
+
+      <label class="row">
+        <span>
+          <strong>Port</strong>
+          <small>Must match Settings → Browser extension in TurboGrab.</small>
+        </span>
+        <input type="number" id="port" min="1024" max="65535" />
+      </label>
+
+      <div class="row">
+        <span>
+          <strong>Pairing</strong>
+          <small id="pairHint">Click Connect, then allow the request in the TurboGrab window.</small>
+        </span>
+        <span class="actions">
+          <button id="connect" class="primary">Connect</button>
+          <button id="forget">Forget</button>
+        </span>
+      </div>
+
+      <label class="row">
+        <span>
+          <strong>Token</strong>
+          <small>Filled in by pairing. You can also paste the one from TurboGrab's settings.</small>
+        </span>
+        <input type="text" id="token" spellcheck="false" placeholder="not paired" />
+      </label>
+    </section>
+
+    <h2>Rules</h2>
+    <section class="card">
+      <label class="row">
+        <span>
+          <strong>Minimum size (MB)</strong>
+          <small>Smaller files stay in the browser — the handover costs more than it saves.</small>
+        </span>
+        <input type="number" id="minSizeMB" min="0" step="0.1" />
+      </label>
+
+      <label class="row">
+        <span>
+          <strong>Take downloads of unknown size</strong>
+          <small>Servers often don't say up front. Off means those stay in the browser.</small>
+        </span>
+        <input type="checkbox" id="takeUnknownSize" />
+      </label>
+
+      <label class="row col">
+        <span>
+          <strong>Never intercept these hosts</strong>
+          <small>One per line. Subdomains included: <code>example.com</code> covers <code>files.example.com</code>.</small>
+        </span>
+        <textarea id="skipHosts" rows="3" spellcheck="false" placeholder="intranet.local"></textarea>
+      </label>
+
+      <label class="row col">
+        <span>
+          <strong>Never intercept these file types</strong>
+          <small>Comma separated, no dots: <code>torrent, m3u8</code>.</small>
+        </span>
+        <input type="text" id="skipExts" spellcheck="false" placeholder="torrent" />
+      </label>
+
+      <label class="row">
+        <span>
+          <strong>Notify on each handover</strong>
+          <small>A short confirmation that a download left the browser.</small>
+        </span>
+        <input type="checkbox" id="notify" />
+      </label>
+    </section>
+
+    <p class="saved" id="saved" hidden>Saved</p>
+
+    <script src="common.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>
