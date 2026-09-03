@@ -130,9 +130,33 @@ straight back to the browser. Closing TurboGrab mid-browse costs you nothing.
 They travel with the download. A session-gated file 403s the moment its URL
 leaves the browser, so the extension reads the cookies for that URL and sends
 them along with the referring page and the browser's own user-agent; TurboGrab
-replays those headers on every connection. This is why the extension asks for
-`cookies` and broad host access — and why it never sends them anywhere but
-`127.0.0.1`.
+replays those headers on every connection.
+
+They are also the most sensitive thing this extension touches, so: they go to
+`127.0.0.1` and nowhere else, they are stored by the app owner-only (`0600`),
+and TurboGrab **deletes them the moment the download finishes** — a completed
+transfer never makes another request, so there is nothing left to keep them
+for.
+
+## Why each permission
+
+The `<all_urls>` one is broad, and it should be the first thing you question.
+Here is the whole list and what breaks without each.
+
+| Permission | Why |
+| --- | --- |
+| `<all_urls>` | The narrower forms don't work here. You can download a file from *any* host, and the extension has to read that host's cookies to make the transfer work outside the browser — so the set of hosts it needs is "wherever you download from", which is not a list anyone can write in advance. It buys **no** content-script access: this extension injects nothing into any page. |
+| `cookies` | Read the cookies for the one URL being handed over. Nothing enumerates cookies for other sites. |
+| `downloads` | See the download that is starting, cancel it, and hand it back if the app can't be reached. |
+| `storage` | Remember your settings and the pairing token. Local only. |
+| `contextMenus` | The **Download with TurboGrab** right-click entry. |
+| `notifications` | Say when a download has been handed over. Switch it off in options. |
+| `alarms` | Poll the app for progress while the popup is closed. |
+| `http://127.0.0.1/*`, `http://localhost/*` | Talk to TurboGrab. The only host the extension ever sends anything to. |
+
+No analytics, no remote config, no update pings, no bundler. The sources you
+read here are the sources that ship — which is also why AMO needs no
+source-code upload from us.
 
 ## Tests
 

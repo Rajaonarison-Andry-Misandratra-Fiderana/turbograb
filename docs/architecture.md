@@ -71,7 +71,7 @@ hide *Open* rather than offer an action that fails.
 
 | File | Contents | Written |
 | --- | --- | --- |
-| `<app_data>/downloads.json` | `Vec<DownloadInfo>` | after every command, and on every 2 % of progress |
+| `<app_data>/downloads.json` | `Vec<DownloadInfo>`, minus the segments and minus the headers of anything already `done` | after every command, and on every 2 % of progress |
 | `<app_data>/settings.json` | folder, language, theme, connections, queue depth, startup, listener, token | on change, via write-then-rename |
 | `<file>.part` | the bytes so far | continuously |
 | `<file>.part.meta` | `SegMeta { total, validator, done[] }` | at each throttled progress tick |
@@ -90,6 +90,27 @@ restart.
 
 On load, `downloading` and `queued` both become `interrupted`: neither survives
 a process exit, and the resume banner is how the user gets them back.
+
+### Credentials have a lifetime
+
+`DownloadInfo::headers` carries the browser's `Cookie`, `Referer` and
+`User-Agent` — genuine credentials for somebody's logged-in session, and the
+only reason a session-gated file downloads outside the browser at all. They are
+persisted because a resume tomorrow needs them as much as the first attempt did.
+
+That reason expires. A `done` download never issues another request, so
+`finish_file` clears its headers on completion, and `forget_spent_credentials`
+runs on both the read and the write of `downloads.json` to catch entries that
+reached `done` under a build that kept them. One launch cleans up a history that
+had been accumulating live cookies indefinitely.
+
+Only `done` qualifies. `error`, `paused` and `interrupted` are all states a
+download resumes *from*, and a resume stripped of its session headers is just a
+403.
+
+Both files live in a `0700` directory and are written `0600` through
+`write_private`. The window where a secret could sit world-readable is closed by
+creating the file with the mode already set, not by chmod-ing it afterwards.
 
 ## The transfer engine
 
@@ -175,6 +196,21 @@ is unauthenticated on purpose and answers nothing but "running".
 
 `Access-Control-Allow-Origin: *` is set because a page can reach the socket
 whatever we answer with — the token is the boundary, not the origin header.
+
+**The token is read from `X-TurboGrab-Token` and from nothing else.** A `?token=`
+query form was accepted once, for clients that cannot set a header. It is gone:
+URLs are copied into referers, proxy logs, shell history and bug reports, and
+headers are not. The convenience was never worth the number of places it leaked
+to.
+
+**`/pair` is capped at one open prompt** (`MAX_PENDING_PAIRS`). It is the only
+unauthenticated route that does something visible — it raises the window and
+puts a dialog on screen — so without a cap any local process could loop on it,
+stack prompts, and hold the app hostage until the user clicked something to make
+it stop. Clicking to end a storm is precisely the accident that hands out a
+token. A request arriving while a prompt is open gets `429 pair_in_progress`
+and never reaches the screen. The slot is claimed and the waiter registered
+under one lock, so two simultaneous calls cannot both find it free.
 
 ### The extension
 
