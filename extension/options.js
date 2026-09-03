@@ -101,10 +101,14 @@ connectBtn.addEventListener("click", async () => {
     F.token.value = res.token;
     await patch({ token: res.token });
   } else {
+    // "refused" is the wrong word for a prompt that never reached the user:
+    // TurboGrab only ever shows one at a time, so something else asked first.
     pairHint.textContent =
       res.error === "unreachable"
         ? `Nothing answering on 127.0.0.1:${s.port}. Is TurboGrab running?`
-        : "The request was refused in TurboGrab.";
+        : res.error === "pair_in_progress"
+          ? "TurboGrab is already asking about another client. Answer that one, then try again."
+          : "The request was refused in TurboGrab.";
     await refreshStatus();
   }
 });

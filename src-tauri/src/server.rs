@@ -36,6 +36,18 @@ pub const DEFAULT_PORT: u16 = 8787;
 /// A pairing prompt expires rather than pinning a connection open forever.
 const PAIR_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How many pairing prompts may be open at once.
+///
+/// One. `/pair` is the only unauthenticated route that *does* something: it
+/// raises the window and puts a dialog in front of the user. Anything running
+/// on this machine can call it in a loop, and without a cap each call stacks
+/// another prompt and steals focus again — the app becomes unusable, and a user
+/// clicking to make the storm stop is exactly the accident that hands out a
+/// token. Serialising the prompts means the answer to the first one is given
+/// deliberately, and every request arriving behind it is refused without ever
+/// reaching the screen.
+const MAX_PENDING_PAIRS: usize = 1;
+
 /// Requests are a URL plus a few headers. Anything larger is not ours.
 const MAX_BODY: usize = 256 * 1024;
 
@@ -217,6 +229,7 @@ async fn respond(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Re
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        429 => "Too Many Requests",
         _ => "Error",
     };
     // `Access-Control-Allow-Origin: *` is safe here only because every route
@@ -270,10 +283,13 @@ async fn handle(app: AppHandle, mut stream: TcpStream) -> std::io::Result<()> {
             });
             let origin = req.header("origin").unwrap_or("").to_string();
             match ask_to_pair(&app, &client.client, &origin).await {
-                Some(token) => {
+                PairOutcome::Paired(token) => {
                     respond(&mut stream, 200, &format!("{{\"ok\":true,\"token\":\"{token}\"}}")).await
                 }
-                None => respond(&mut stream, 403, &json_err("denied")).await,
+                PairOutcome::Denied => respond(&mut stream, 403, &json_err("denied")).await,
+                // 429, not 403: the caller may well be legitimate and simply
+                // second in line, and the extension retries on its own.
+                PairOutcome::Busy => respond(&mut stream, 429, &json_err("pair_in_progress")).await,
             }
         }
         ("POST", "/add") => {
@@ -313,19 +329,18 @@ fn token_eq(a: &str, b: &str) -> bool {
     a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// The token travels in a header and nowhere else.
+///
+/// A `?token=` query form used to be accepted here for clients that cannot set
+/// a header. It is gone: a URL is the single most copied string in the system,
+/// and it ends up in `Referer`, in proxy and access logs, in shell history and
+/// in whatever the user pastes into a bug report. A header is copied by nobody.
+/// Every client that matters — the extension, curl, a shell one-liner — can set
+/// one, so the convenience was never worth the number of places it leaked to.
 fn authorized(app: &AppHandle, req: &Request) -> bool {
-    let sent = req
-        .header("x-turbograb-token")
-        .map(|s| s.to_string())
-        .or_else(|| {
-            // Query form, for the odd client that can't set a header.
-            req.path
-                .split_once("token=")
-                .map(|(_, v)| v.split('&').next().unwrap_or("").to_string())
-        })
-        .unwrap_or_default();
+    let sent = req.header("x-turbograb-token").unwrap_or_default();
     let stored = app.state::<AppState>().settings.lock().unwrap().token.clone();
-    token_eq(&sent, &stored)
+    token_eq(sent, &stored)
 }
 
 /// Ask the user, in the app window, whether this client may pair.
@@ -333,12 +348,27 @@ fn authorized(app: &AppHandle, req: &Request) -> bool {
 /// The prompt is the whole security model of the API, so it blocks: the HTTP
 /// request is held open until someone answers or the prompt times out. The
 /// window is raised, because a dialog nobody can see cannot be consented to.
-async fn ask_to_pair(app: &AppHandle, client: &str, origin: &str) -> Option<String> {
+/// Why a pairing attempt did not produce a token.
+enum PairOutcome {
+    Paired(String),
+    /// The user said no, or the prompt timed out.
+    Denied,
+    /// A prompt was already on screen. Never reaches the user.
+    Busy,
+}
+
+async fn ask_to_pair(app: &AppHandle, client: &str, origin: &str) -> PairOutcome {
     let req_id = crate::random_hex(8);
     let (tx, rx) = oneshot::channel::<bool>();
     {
+        // Claim the one slot and register the waiter under a single lock: two
+        // requests arriving together must not both find it free.
         let state = app.state::<AppState>();
-        state.pending_pairs.lock().unwrap().insert(req_id.clone(), tx);
+        let mut pending = state.pending_pairs.lock().unwrap();
+        if pending.len() >= MAX_PENDING_PAIRS {
+            return PairOutcome::Busy;
+        }
+        pending.insert(req_id.clone(), tx);
     }
     crate::show_main(app);
     let _ = app.emit(
@@ -361,7 +391,7 @@ async fn ask_to_pair(app: &AppHandle, client: &str, origin: &str) -> Option<Stri
         state.pending_pairs.lock().unwrap().remove(&req_id);
         if !allowed {
             let _ = app.emit("pair-closed", req_id);
-            return None;
+            return PairOutcome::Denied;
         }
         let mut s = state.settings.lock().unwrap();
         if s.token.is_empty() {
@@ -371,7 +401,7 @@ async fn ask_to_pair(app: &AppHandle, client: &str, origin: &str) -> Option<Stri
         drop(s);
         crate::save_settings(app);
         state.paired.store(true, Ordering::Relaxed);
-        Some(token)
+        PairOutcome::Paired(token)
     }
 }
 
@@ -386,6 +416,27 @@ mod tests {
         assert!(!token_eq("abc123", "abc1234"));
         // An app with no token yet must not be unlocked by sending no token.
         assert!(!token_eq("", ""));
+    }
+
+    /// The token must be read from the header and from nowhere else — a URL is
+    /// copied into logs and referers, a header is not.
+    #[test]
+    fn a_token_in_the_query_string_does_not_authorize() {
+        let req = Request {
+            method: "POST".into(),
+            path: "/add?token=deadbeefdeadbeefdeadbeefdeadbeef".into(),
+            headers: vec![],
+            body: String::new(),
+        };
+        assert_eq!(req.header("x-turbograb-token"), None);
+    }
+
+    #[test]
+    fn only_one_pairing_prompt_may_be_open() {
+        assert_eq!(
+            MAX_PENDING_PAIRS, 1,
+            "stacked prompts are how a user gets clicked into handing out a token"
+        );
     }
 
     #[test]
