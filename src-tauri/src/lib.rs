@@ -109,6 +109,12 @@ pub struct DownloadInfo {
     /// This is what makes a download that needs a session work outside the
     /// browser, and it is why they are persisted: a resume tomorrow needs them
     /// as much as the first attempt did.
+    ///
+    /// They are dropped the moment the download is `done`. A finished transfer
+    /// never issues another request, so keeping its `Cookie` would leave a live
+    /// session for some unrelated site sitting in the history file for as long
+    /// as the entry survives — months, for a download nobody clears. The window
+    /// in which these are worth their risk ends at the last byte.
     #[serde(default)]
     pub headers: Headers,
     /// "app" | "browser" — where the download came from. Shown on the card, so
@@ -350,6 +356,22 @@ fn state_file(app: &AppHandle) -> Option<PathBuf> {
     Some(data_dir(app)?.join("downloads.json"))
 }
 
+/// Drop the replay headers of a download that has nothing left to replay.
+///
+/// `finish_file` already does this the moment a transfer completes, so in a
+/// steady state this is a no-op. It exists for the entries that never went
+/// through it: a `downloads.json` written by a build that kept the headers
+/// forever. Both ends of the file — the read and the write — run it, so one
+/// launch is enough to clear a history that has been accumulating cookies.
+///
+/// Only "done" qualifies. "error", "paused" and "interrupted" are all states a
+/// download resumes from, and a resume without the session headers fails.
+fn forget_spent_credentials(info: &mut DownloadInfo) {
+    if info.status == "done" {
+        info.headers.clear();
+    }
+}
+
 fn save(app: &AppHandle) {
     let Some(path) = state_file(app) else { return };
     let state = app.state::<AppState>();
@@ -364,9 +386,11 @@ fn save(app: &AppHandle) {
     // has no business in the on-disk history.
     for i in &mut infos {
         i.segments.clear();
+        forget_spent_credentials(i);
     }
     if let Ok(json) = serde_json::to_vec_pretty(&infos) {
-        // Private: the persisted headers are the browser's own cookies.
+        // Private: for anything still running, the persisted headers are the
+        // browser's own cookies.
         let _ = write_private(&path, &json);
     }
 }
@@ -391,6 +415,7 @@ fn load(app: &AppHandle) {
             }
             _ => {}
         }
+        forget_spent_credentials(&mut info);
         if info.retry_max == 0 {
             info.retry_max = MAX_RETRY;
         }
@@ -654,6 +679,11 @@ fn finish_file(app: &AppHandle, id: &str) {
         it.info.eta_secs = -1;
         it.info.connections = 0;
         it.info.segments.clear();
+        // The session dies with the transfer. Nothing downstream re-requests a
+        // finished file, so the cookies stop being credentials and become only
+        // a liability — drop them here rather than at save(), so they leave
+        // memory too and not just the disk.
+        it.info.headers.clear();
         let _ = app.emit("download-update", it.info.clone());
     }
     save(app);
@@ -1397,6 +1427,36 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(active_count(&items), 2);
+    }
+
+    // ---- spent credentials -----------------------------------------------
+
+    fn with_cookie(status: &str) -> DownloadInfo {
+        let mut info = DownloadInfo { status: status.into(), ..DownloadInfo::blank() };
+        info.headers.insert("Cookie".into(), "session=abc123".into());
+        info.headers.insert("Authorization".into(), "Bearer xyz".into());
+        info
+    }
+
+    #[test]
+    fn a_finished_download_keeps_no_cookies() {
+        let mut info = with_cookie("done");
+        forget_spent_credentials(&mut info);
+        assert!(
+            info.headers.is_empty(),
+            "a done download never requests again; its session must not outlive it"
+        );
+    }
+
+    #[test]
+    fn a_download_that_can_still_resume_keeps_its_headers() {
+        // Dropping these would turn every resume of a session-gated file into a
+        // 403 — the cookies are exactly what makes the link work.
+        for status in ["downloading", "queued", "paused", "interrupted", "error"] {
+            let mut info = with_cookie(status);
+            forget_spent_credentials(&mut info);
+            assert!(!info.headers.is_empty(), "{status} still needs its headers to resume");
+        }
     }
 
     // ---- secrets on disk -------------------------------------------------
